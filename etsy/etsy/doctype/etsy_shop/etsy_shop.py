@@ -423,7 +423,7 @@ class EtsyShop(Document):
 						"{ETSY_ORDER_ID}", str(receipt.receipt_id)
 					)
 				sales_order.etsy_order_id = sales_order.po_no = receipt.receipt_id
-				sales_order.customer = customer
+				sales_order.customer = customer.name
 				sales_order.company = self.company
 
 				sales_order.transaction_date = sales_order.po_date = receipt.created_timestamp.date()

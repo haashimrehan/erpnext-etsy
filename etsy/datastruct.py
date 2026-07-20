@@ -821,9 +821,9 @@ class Listing(BaseModel):
 	is_taxable: bool
 	is_customizable: bool
 	is_personalizable: bool
-	personalization_is_required: bool
-	personalization_char_count_max: int | None
-	personalization_instructions: str | None
+	personalization_is_required: bool | None = None
+	personalization_char_count_max: int | None = None
+	personalization_instructions: str | None = None
 	listing_type: ListingType
 	tags: list[str]
 	materials: list[str]

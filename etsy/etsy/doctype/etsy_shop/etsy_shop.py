@@ -415,10 +415,28 @@ class EtsyShop(Document):
 				frappe.db.rollback()
 				frappe.log_error(f"Etsy: Failed to import listing {listing.listing_id}")
 
+	def get_receivable_account(self, currency: str) -> str | None:
+		"""Find a non-group Receivable account in the given currency for this company.
+
+		Returns None if there is no match, in which case ERPNext falls back to the
+		company default (debit_to stays unset and is resolved normally).
+		"""
+		return frappe.db.get_value(
+			"Account",
+			{
+				"company": self.company,
+				"account_type": "Receivable",
+				"account_currency": currency,
+				"is_group": 0,
+			},
+		)
+
 	def import_receipts(
 		self, min_date: str | None = None, max_date: str | None = None, abort_on_exist: bool = False
 	):
 		api = EtsyAPI(self)
+
+		company_currency = frappe.get_cached_value("Company", self.company, "default_currency")
 
 		for receipt in fetch_all(
 			lambda o: api.getShopReceipts(
@@ -512,6 +530,18 @@ class EtsyShop(Document):
 					customer.customer_primary_contact = contact.name
 					customer.save()
 
+				### Currency
+				# Etsy reports every monetary amount on the receipt in the shop/order
+				# currency carried by the MonetaryAmount objects. Use it so USD orders
+				# post as USD documents instead of being mislabeled company currency.
+				order_currency = receipt.grandtotal.currency_code.value
+				if order_currency != company_currency:
+					conversion_rate = get_exchange_rate(
+						order_currency, company_currency, str(receipt.created_timestamp.date())
+					)
+				else:
+					conversion_rate = 1.0
+
 				### Sales Order
 				sales_order: Document = frappe.new_doc("Sales Order")
 				if naming_series := self.sales_order_naming_series:
@@ -521,6 +551,13 @@ class EtsyShop(Document):
 				sales_order.etsy_order_id = sales_order.po_no = receipt.receipt_id
 				sales_order.customer = customer.name
 				sales_order.company = self.company
+
+				sales_order.currency = order_currency
+				sales_order.conversion_rate = conversion_rate
+				# keep price list conversion consistent with the order currency so
+				# ERPNext does not recompute rates from a company-currency price list
+				sales_order.price_list_currency = order_currency
+				sales_order.plc_conversion_rate = conversion_rate
 
 				sales_order.transaction_date = sales_order.po_date = receipt.created_timestamp.date()
 				sales_order.delivery_date = max(
@@ -558,6 +595,7 @@ class EtsyShop(Document):
 						else sales_order.delivery_date,
 						"uom": item.stock_uom,
 						"qty": transaction.quantity,
+						# rate is in the order currency set above
 						"rate": transaction.price.as_float(),
 						"description": "".join(
 							[
@@ -583,6 +621,7 @@ class EtsyShop(Document):
 				# Note: total_tax_cost (US/non-EU marketplace facilitator tax) is intentionally excluded —
 				# Etsy collects and remits it directly and deducts it from the seller's payout, so it is
 				# never the seller's revenue and must not appear as a receivable.
+				# tax_amount values below are in the order currency (matches receipt amounts).
 				if self.vat_account and receipt.total_vat_cost.as_float() > 0.0:
 					sales_order.append(
 						"taxes",
@@ -634,6 +673,12 @@ class EtsyShop(Document):
 				sales_invoice.posting_date = receipt.created_timestamp.date()
 				sales_invoice.due_date = receipt.created_timestamp.date()
 
+				# Receivable account matching the order currency (e.g. USD AR for USD
+				# orders). Falls back to the company default when no such account exists.
+				if order_currency != company_currency:
+					if receivable_account := self.get_receivable_account(order_currency):
+						sales_invoice.debit_to = receivable_account
+
 				# Income Accounts
 				if self.income_account_physical or self.income_account_digital:
 					for invoice_item in sales_invoice.items:
@@ -652,6 +697,11 @@ class EtsyShop(Document):
 				sales_invoice.submit()
 
 				### Payment
+				# self.bank_account should point at an "Etsy Clearing" account (ideally
+				# in the payout currency, e.g. USD), NOT the real bank account. Etsy
+				# deposits batched payouts net of fees, so per-order payment entries can
+				# only ever reconcile against a clearing account; the real bank deposit
+				# is recorded separately per payout (bank + fees vs clearing).
 				if receipt.is_paid:
 					payment_entry: Document = get_payment_entry(
 						sales_invoice.doctype, sales_invoice.name, bank_account=self.bank_account

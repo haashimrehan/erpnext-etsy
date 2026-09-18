@@ -3,6 +3,10 @@ from frappe.model.document import Document
 
 RECEIPTS_SCHEDULED_JOB_TYPE_METHOD = "etsy.api.synchronise_receipts"
 LISTINGS_SCHEDULED_JOB_TYPE_METHOD = "etsy.api.synchronise_listings"
+FEES_SCHEDULED_JOB_TYPE_METHOD = "etsy.api.synchronise_fees"
+PAYOUTS_SCHEDULED_JOB_TYPE_METHOD = "etsy.api.synchronise_payouts"
+FEES_JOB_HOUR = 3  # hour of the day at which the monthly fee Journal Entry job runs
+PAYOUTS_JOB_HOUR = 4  # hour of the day at which the payout Journal Entry job runs
 
 
 class EtsySettings(Document):
@@ -22,7 +26,49 @@ class EtsySettings(Document):
 	def item_next_sync(self):
 		return self.get_scheduler(self.item_scheduler_link).next_execution
 
+	@property
+	def fee_last_sync(self):
+		return self.get_scheduler(self.fee_scheduler_link).last_execution
+
+	@property
+	def fee_next_sync(self):
+		return self.get_scheduler(self.fee_scheduler_link).next_execution
+
+	@property
+	def payout_last_sync(self):
+		return self.get_scheduler(self.payout_scheduler_link).last_execution
+
+	@property
+	def payout_next_sync(self):
+		return self.get_scheduler(self.payout_scheduler_link).next_execution
+
 	def before_save(self):
+		### payouts
+		payout_interval = min(max(0, self.payout_sync_interval or 0), 30)
+		self.payout_sync_interval = payout_interval
+
+		payout_job = self.get_scheduler(self.payout_scheduler_link)
+		payout_job.method = PAYOUTS_SCHEDULED_JOB_TYPE_METHOD
+		payout_job.frequency = "Cron"
+		payout_job.cron_format = f"0 {PAYOUTS_JOB_HOUR} */{max(1, payout_interval)} * *"  # runs every X days
+		payout_job.stopped = 1 - (self.etsy_enabled * min(1, payout_interval))
+		payout_job.save()
+
+		self.payout_scheduler_link = payout_job.name
+
+		### fees
+		fee_day = min(max(0, self.fee_journal_day or 0), 28)
+		self.fee_journal_day = fee_day
+
+		fee_job = self.get_scheduler(self.fee_scheduler_link)
+		fee_job.method = FEES_SCHEDULED_JOB_TYPE_METHOD
+		fee_job.frequency = "Cron"
+		fee_job.cron_format = f"0 {FEES_JOB_HOUR} {max(1, fee_day)} * *"  # runs monthly on day X
+		fee_job.stopped = 1 - (self.etsy_enabled * min(1, fee_day))
+		fee_job.save()
+
+		self.fee_scheduler_link = fee_job.name
+
 		### receipts
 		sales_order_interval = min(max(0, self.sales_order_sync_interval), 60)
 		self.sales_order_sync_interval = sales_order_interval

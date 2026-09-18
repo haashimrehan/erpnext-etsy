@@ -98,6 +98,22 @@ Configure how ERPNext handles data from this Etsy shop.
 | **Item Group** | Link | No | Default item group for imported listings. Falls back to Stock Settings > Default Item Group. |
 | **Default Unit of Measure** | Link | No | Default UOM for items. Can be overridden per listing in Etsy Listing doctype. |
 
+### Fee & Payout Settings (Journal Entries)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| **Etsy Fees Expense Account** | Link | No* | Listing, transaction, processing and regulatory fees. Fallback for all other categories. *Required to enable fee booking for this shop. |
+| **Marketing Expense Account** | Link | No | Etsy Ads and Offsite Ads. |
+| **Shipping Label Expense Account** | Link | No | Postage labels bought through Etsy. |
+| **Other Expense Account** | Link | No | Unclassified charges. |
+| **Tax on Seller Fees Account** | Link | No | VAT / tax on fees. Empty: booked to the expense account of the related fee. |
+| **Cost Center for fees** | Link | No | Defaults to the company's default Cost Center. |
+| **Submit Journal Entry automatically** | Check | No | Unchecked: Journal Entry stays in draft for review. |
+| **Payout Account** | Link | No | Bank account receiving Etsy payouts (e.g. Wise USD). Enables one Bank Entry per payout from the Bank Account to this account. |
+| **Submit Payout Journal Entries automatically** | Check | No | Unchecked: payout entries stay in draft. |
+
+See [Fees & Expenses](fees-and-expenses.md) for details on how ledger entries are classified and payouts are booked.
+
 ## Buttons and Actions
 
 | Button | When Visible | Action |
@@ -107,6 +123,7 @@ Configure how ERPNext handles data from this Etsy shop.
 | **Import Listings** | When connected | Fetches all active listings from Etsy and creates/updates Etsy Listing documents. |
 | **Import Receipts** | When connected | Imports recent orders (receipts) from Etsy as Sales Orders. |
 | **Import Historic Receipts** | When connected | Opens dialog to bulk import orders from a specific date. |
+| **Create > Etsy Fees & Payouts** | When connected | Opens dialog to book the Etsy fees and payouts of a month or a range of months. One fee Journal Entry per month, one Bank Entry per payout. |
 
 ## Configuration Best Practices
 

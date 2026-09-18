@@ -19,6 +19,10 @@ def before_uninstall():
 		frappe.db.delete("Scheduled Job Type", {"name": etsy_settings.item_scheduler_link})
 	if etsy_settings.sales_order_scheduler_link:
 		frappe.db.delete("Scheduled Job Type", {"name": etsy_settings.sales_order_scheduler_link})
+	if etsy_settings.fee_scheduler_link:
+		frappe.db.delete("Scheduled Job Type", {"name": etsy_settings.fee_scheduler_link})
+	if etsy_settings.payout_scheduler_link:
+		frappe.db.delete("Scheduled Job Type", {"name": etsy_settings.payout_scheduler_link})
 
 
 def after_uninstall():

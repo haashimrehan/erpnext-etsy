@@ -97,6 +97,25 @@ When disabled, all scheduled sync jobs are stopped. You can still manually impor
 | **Next Sync** | Datetime | Read-only | - | When the next sync will run. |
 | **Scheduler Link** | Link | Read-only | - | Link to the Scheduled Job Type document. |
 
+#### Fees - Monthly Journal Entry
+
+| Field | Type | Range | Default | Description |
+|-------|------|-------|---------|-------------|
+| **Day of Month** | Int | 1-28 | 1 | Day on which the fee Journal Entry for the previous month is created. Set to `0` to disable. |
+| **Last Run** | Datetime | Read-only | - | Timestamp of last run. |
+| **Next Run** | Datetime | Read-only | - | When the job will run next. |
+| **Scheduler Link** | Link | Read-only | - | Link to the Scheduled Job Type document. |
+
+See [Fees & Expenses](fees-and-expenses.md) for what the job books.
+
+#### Payouts - Journal Entries
+
+| Field | Type | Range | Default | Description |
+|-------|------|-------|---------|-------------|
+| **Sync Interval** | Int | 1-30 days | 1 | How often new Etsy payouts are booked as Bank Entries. Set to `0` to disable. |
+| **Last Sync / Next Sync** | Datetime | Read-only | - | Timestamps of the Scheduled Job Type. |
+| **Scheduler Link** | Link | Read-only | - | Link to the Scheduled Job Type document. |
+
 ### How Scheduled Jobs Work
 
 When you save Etsy Settings with synchronization enabled:
@@ -121,7 +140,7 @@ When you save Etsy Settings with synchronization enabled:
 
 ### Scheduled Job Types
 
-Two Scheduled Job Types are created:
+Four Scheduled Job Types are created:
 
 #### Sales Order Sync Job
 
@@ -138,6 +157,22 @@ Loops through all Etsy Shops with status = "Connected", calls `import_receipts()
 - **Cron Example**: `0 */24 * * *` (every 24 hours)
 
 Loops through all Etsy Shops with status = "Connected", calls `import_listings()` on each, and logs errors per shop without stopping the entire job.
+
+#### Fee Journal Entry Job
+
+- **Function**: `etsy.api.synchronise_fees`
+- **Frequency**: Monthly, based on "Day of Month" (1-28) at 03:00 server time
+- **Cron Example**: `0 3 1 * *` (1st of every month)
+
+Loops through all Etsy Shops with status = "Connected" and a configured "Etsy Fees Expense Account" or "Payout Account", calls `book_ledger_month()` for the previous month on each (fee Journal Entry plus payout Bank Entries), and logs errors per shop without stopping the entire job. Months that already have a fee Journal Entry, and payouts that are already booked, are skipped.
+
+#### Payout Job
+
+- **Function**: `etsy.api.synchronise_payouts`
+- **Frequency**: Based on "Payouts > Sync Interval" (1-30 days) at 04:00 server time
+- **Cron Example**: `0 4 */1 * *` (daily)
+
+Loops through all Etsy Shops with status = "Connected" and a configured "Payout Account", downloads the last 35 days of the payment account ledger and books every payout that has no Journal Entry yet.
 
 ![Scheduled Job Type](../images/features-scheduled-job-type.png)
 

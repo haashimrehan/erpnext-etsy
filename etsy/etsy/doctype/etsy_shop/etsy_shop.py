@@ -5,17 +5,48 @@ import os
 import secrets
 from urllib.parse import quote_plus, unquote_plus, urlencode, urljoin
 
+import erpnext
 import frappe
 import pytz
 from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
 from erpnext.selling.doctype.sales_order.sales_order import close_or_unclose_sales_orders, make_sales_invoice
+from erpnext.setup.utils import get_exchange_rate
 from frappe import _
 from frappe.model.document import Document
-from frappe.utils import cint, cstr, get_system_timezone
+from frappe.utils import (
+	add_days,
+	cint,
+	cstr,
+	flt,
+	get_first_day,
+	get_last_day,
+	get_link_to_form,
+	get_system_timezone,
+	getdate,
+)
 from requests_oauthlib import OAuth2Session
 
-from etsy.api import EtsyAPI, QP_getListingsByShop, QP_getShopReceipts, fetch_all
-from etsy.datastruct import ListingType
+from etsy.api import (
+	EtsyAPI,
+	QP_getListingsByShop,
+	QP_getShopPaymentAccountLedgerEntries,
+	QP_getShopReceipts,
+	fetch_all,
+)
+from etsy.datastruct import LedgerEntry, ListingType
+from etsy.fees import (
+	CATEGORY_FEES,
+	CATEGORY_MARKETING,
+	CATEGORY_OTHER,
+	CATEGORY_SHIPPING,
+	FeeBucket,
+	LedgerRow,
+	aggregate_fees,
+	build_journal_rows,
+	format_breakdown,
+	is_payout,
+	ledger_amount,
+)
 
 AUTHORIZATION_URI = "https://www.etsy.com/oauth/connect"
 TOKEN_URI = "https://api.etsy.com/v3/public/oauth/token"
@@ -23,12 +54,36 @@ SCOPES = ["address_r", "email_r", "listings_r", "shops_r", "transactions_r"]
 QUERY_PARAMS = {}
 LISTING_STATES = ("active", "inactive", "sold_out", "draft", "expired")
 
+# Etsy rejects a ledger request whose window is longer than 31 days (2678400 seconds).
+LEDGER_MAX_WINDOW_DAYS = 30
+
+# Guards a mistyped backfill range from queueing years of API calls.
+MAX_BACKFILL_MONTHS = 36
+
 
 if any((os.getenv("CI"), frappe.conf.developer_mode, frappe.conf.allow_tests)):
 	# Disable mandatory TLS in developer mode and tests
 	os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
 os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
+
+
+def months_between(from_date, to_date) -> list[tuple[int, int]]:
+	"""
+	Every ``(year, month)`` the period touches, oldest first and inclusive on both ends.
+
+	Only the months matter, so any day inside a month selects that whole month.
+	"""
+	start, end = getdate(from_date), getdate(to_date)
+	if end < start:
+		start, end = end, start
+
+	months: list[tuple[int, int]] = []
+	year, month = start.year, start.month
+	while (year, month) <= (end.year, end.month):
+		months.append((year, month))
+		year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+	return months
 
 
 def short_title(title: str) -> str:  # TODO: move to utils
@@ -242,6 +297,47 @@ class EtsyShop(Document):
 			min_date=min_date,
 			max_date=max_date,
 		)
+
+	@frappe.whitelist()
+	def enqueue_book_ledger(
+		self, from_date: str, to_date: str | None = None, fees: int = 1, payouts: int = 1
+	):
+		"""
+		Enqueue booking of Etsy fees and/or payouts for every month the period touches.
+
+		Each month is booked into its own Journal Entry, dated in that month, so a backfill of
+		several months is one action but still produces correct monthly postings.
+		"""
+		fees, payouts = cint(fees), cint(payouts)
+		if not (fees or payouts):
+			frappe.throw(_("Select at least one of 'Book Fees' and 'Book Payouts'."))
+		if fees:
+			self.validate_fee_settings()
+		if payouts:
+			self.validate_payout_settings()
+
+		months = months_between(from_date, to_date or from_date)
+		if len(months) > MAX_BACKFILL_MONTHS:
+			frappe.throw(
+				_("That period covers {0} months. Please book at most {1} months at a time.").format(
+					len(months), MAX_BACKFILL_MONTHS
+				)
+			)
+
+		frappe.enqueue(
+			"etsy.etsy.doctype.etsy_shop.etsy_shop.run_book_ledger",
+			queue="long",
+			timeout=3600,
+			enqueue_after_commit=True,
+			user=frappe.session.user,
+			etsy_shop=self.name,
+			from_date=str(getdate(from_date)),
+			to_date=str(getdate(to_date or from_date)),
+			fees=fees,
+			payouts=payouts,
+		)
+
+		return len(months)
 
 	def import_listings(
 		self,
@@ -575,6 +671,302 @@ class EtsyShop(Document):
 				frappe.db.rollback()
 				frappe.log_error(f"Etsy: Failed to import receipt {receipt.receipt_id}")
 
+	### Etsy ledger -> Journal Entries (fees & payouts) ###
+	def validate_fee_settings(self):
+		if not self.fees_expense_account:
+			frappe.throw(
+				_("Please set the 'Etsy Fees Expense Account' in the Fee Settings of Etsy Shop {0}.").format(
+					self.name
+				)
+			)
+		if not self.bank_account:
+			frappe.throw(_("Please set the 'Bank Account' of Etsy Shop {0}.").format(self.name))
+
+	def validate_payout_settings(self):
+		if not self.payout_account:
+			frappe.throw(
+				_("Please set the 'Payout Account' in the Fee Settings of Etsy Shop {0}.").format(self.name)
+			)
+		if not self.bank_account:
+			frappe.throw(_("Please set the 'Bank Account' of Etsy Shop {0}.").format(self.name))
+		if self.payout_account == self.bank_account:
+			frappe.throw(_("'Payout Account' and 'Bank Account' must be different accounts."))
+
+	def get_fee_account(self, bucket: FeeBucket) -> str:
+		"""Resolve the expense account for a fee bucket; everything falls back to the Etsy Fees account."""
+		if bucket.classification.is_tax and self.fee_tax_account:
+			return self.fee_tax_account
+
+		category_accounts = {
+			CATEGORY_FEES: self.fees_expense_account,
+			CATEGORY_MARKETING: self.marketing_expense_account,
+			CATEGORY_SHIPPING: self.shipping_expense_account,
+			CATEGORY_OTHER: self.other_expense_account,
+		}
+		return category_accounts.get(bucket.classification.category) or self.fees_expense_account
+
+	@staticmethod
+	def fee_period(year: int, month: int) -> str:
+		return f"{cint(year):04d}-{cint(month):02d}"
+
+	@staticmethod
+	def get_fee_journal_entry(etsy_shop: str, year: int, month: int) -> str | None:
+		"""Return the name of an existing (draft or submitted) fee Journal Entry for this shop and month."""
+		return frappe.db.get_value(
+			"Journal Entry",
+			{
+				"etsy_shop": etsy_shop,
+				"etsy_fee_period": EtsyShop.fee_period(year, month),
+				"docstatus": ("<", 2),
+			},
+			"name",
+		)
+
+	@staticmethod
+	def get_payout_journal_entry(entry_id: int | str) -> str | None:
+		"""Return the name of an existing (draft or submitted) Journal Entry for this ledger entry."""
+		return frappe.db.get_value(
+			"Journal Entry",
+			{"etsy_ledger_entry_id": cstr(entry_id), "docstatus": ("<", 2)},
+			"name",
+		)
+
+	def fetch_ledger_entries(self, from_date, to_date, etsy_api: EtsyAPI | None = None) -> list[LedgerEntry]:
+		"""
+		Download all payment account ledger entries between two dates (inclusive).
+
+		Etsy rejects any request whose window is longer than 31 days, so the period is split into
+		chunks of at most ``LEDGER_MAX_WINDOW_DAYS``. The chunk size also keeps a whole day of slack,
+		which a single calendar month would not have: a 31 day month spans 2678399 seconds, one
+		second inside the limit, and a daylight saving change that sets the clocks back pushes it
+		over.
+		"""
+		api = etsy_api or EtsyAPI(self)
+		from_date, to_date = getdate(from_date), getdate(to_date)
+
+		entries: list[LedgerEntry] = []
+		window_start = from_date
+		while window_start <= to_date:
+			window_end = min(add_days(window_start, LEDGER_MAX_WINDOW_DAYS - 1), to_date)
+			entries.extend(self.fetch_ledger_window(api, window_start, window_end))
+			window_start = add_days(window_end, 1)
+
+		return entries
+
+	def fetch_ledger_window(self, api: EtsyAPI, from_date, to_date) -> list[LedgerEntry]:
+		"""Download one window of at most 31 days. See ``fetch_ledger_entries``."""
+		return list(
+			fetch_all(
+				lambda o: api.getShopPaymentAccountLedgerEntries(
+					QP_getShopPaymentAccountLedgerEntries(
+						shop_id=self.shop_id,
+						min_created=int(
+							frappe.utils.get_datetime(f"{getdate(from_date)} 00:00:00").timestamp()
+						),
+						max_created=int(
+							frappe.utils.get_datetime(f"{getdate(to_date)} 23:59:59").timestamp()
+						),
+						limit=100,
+						offset=o,
+					)
+				)
+			)
+		)
+
+	def fetch_ledger_month(self, year: int, month: int, etsy_api: EtsyAPI | None = None) -> list[LedgerEntry]:
+		first_day = get_first_day(f"{self.fee_period(year, month)}-01")
+		return self.fetch_ledger_entries(first_day, get_last_day(first_day), etsy_api)
+
+	def book_ledger_month(
+		self,
+		year: int,
+		month: int,
+		fees: bool = True,
+		payouts: bool = True,
+		etsy_api: EtsyAPI | None = None,
+		ledger_entries: list[LedgerEntry] | None = None,
+	) -> dict:
+		"""
+		Book the Etsy ledger of one month: the fee Journal Entry and one Journal Entry per payout.
+		Returns ``{"fee_journal_entry": name | None, "payout_journal_entries": [names]}``.
+		"""
+		result = {"fee_journal_entry": None, "payout_journal_entries": []}
+		if not (fees or payouts):
+			return result
+
+		entries = (
+			ledger_entries if ledger_entries is not None else self.fetch_ledger_month(year, month, etsy_api)
+		)
+
+		if fees:
+			result["fee_journal_entry"] = self.create_fee_journal_entry(year, month, ledger_entries=entries)
+		if payouts:
+			result["payout_journal_entries"] = self.create_payout_journal_entries(entries)
+		return result
+
+	def get_ledger_currency(self, entries: list[LedgerEntry]) -> str:
+		currencies = {e.currency.upper() for e in entries if e.currency}
+		if len(currencies) > 1:
+			frappe.throw(
+				_("Etsy ledger entries with mixed currencies are not supported: {0}").format(currencies)
+			)
+		return currencies.pop() if currencies else erpnext.get_company_currency(self.company)
+
+	def create_fee_journal_entry(
+		self,
+		year: int,
+		month: int,
+		etsy_api: EtsyAPI | None = None,
+		ledger_entries: list[LedgerEntry] | None = None,
+	) -> str | None:
+		"""
+		Create one Journal Entry booking all Etsy fees of a month (listing, transaction & processing fees,
+		marketing / ads, shipping labels, taxes on fees, ...) against the shop's bank account.
+
+		Idempotent: if a Journal Entry for this shop and month already exists its name is returned.
+		Returns ``None`` when the month contains no fee entries.
+		"""
+		self.validate_fee_settings()
+
+		if existing := self.get_fee_journal_entry(self.name, year, month):
+			return existing
+
+		entries = (
+			ledger_entries if ledger_entries is not None else self.fetch_ledger_month(year, month, etsy_api)
+		)
+		buckets = aggregate_fees(entries)
+		if not buckets:
+			return None
+
+		ledger_currency = self.get_ledger_currency(entries)
+		period = self.fee_period(year, month)
+		posting_date = get_last_day(f"{period}-01")
+
+		journal_entry: Document = frappe.new_doc("Journal Entry")
+		journal_entry.voucher_type = "Journal Entry"
+		journal_entry.company = self.company
+		journal_entry.posting_date = posting_date
+		journal_entry.title = f"Etsy Fees {period} - {self.name}"
+		journal_entry.etsy_shop = self.name
+		journal_entry.etsy_fee_period = period
+		journal_entry.user_remark = self.get_fee_remark(period, buckets, ledger_currency)
+
+		rows = [
+			LedgerRow(self.get_fee_account(bucket), -bucket.total, format_breakdown(bucket, ledger_currency))
+			for bucket in buckets
+		]
+		rows.append(
+			LedgerRow(
+				self.bank_account,
+				flt(sum(bucket.total for bucket in buckets), 2),
+				_("Etsy fees deducted from payment account"),
+			)
+		)
+		self.append_ledger_rows(journal_entry, rows, ledger_currency, posting_date)
+
+		journal_entry.flags.ignore_permissions = True
+		journal_entry.insert(ignore_permissions=True)
+		if self.fee_journal_entry_submit:
+			journal_entry.submit()
+
+		return journal_entry.name
+
+	def get_fee_remark(self, period: str, buckets: list[FeeBucket], currency: str) -> str:
+		lines = [f"Etsy fees for {period} ({self.name})"]
+		lines.extend(f"{bucket.label}: {bucket.total:.2f} {currency}" for bucket in buckets)
+		lines.append(f"Total: {sum(bucket.total for bucket in buckets):.2f} {currency}")
+		return "\n".join(lines)
+
+	def create_payout_journal_entries(self, ledger_entries: list[LedgerEntry]) -> list[str]:
+		"""
+		Create one Bank Entry per Etsy payout (deposit) moving the amount from the shop's bank
+		(clearing) account to the payout account. Returned payouts are booked in reverse.
+
+		Idempotent per ledger entry. Returns the names of the newly created Journal Entries.
+		"""
+		self.validate_payout_settings()
+
+		created = []
+		for entry in ledger_entries:
+			if not is_payout(entry) or self.get_payout_journal_entry(entry.entry_id):
+				continue
+			created.append(self.create_payout_journal_entry(entry))
+		return created
+
+	def create_payout_journal_entry(self, entry: LedgerEntry) -> str:
+		amount = ledger_amount(entry)  # negative = money left the Etsy balance
+		ledger_currency = (entry.currency or erpnext.get_company_currency(self.company)).upper()
+		posting_date = getdate(entry.created_timestamp)
+		description = (entry.description or "Payout").strip()
+
+		journal_entry: Document = frappe.new_doc("Journal Entry")
+		journal_entry.voucher_type = "Bank Entry"
+		journal_entry.company = self.company
+		journal_entry.posting_date = posting_date
+		journal_entry.cheque_no = f"Etsy {description} {entry.entry_id}"
+		journal_entry.cheque_date = posting_date
+		journal_entry.title = f"Etsy {description} {posting_date} - {self.name}"
+		journal_entry.etsy_shop = self.name
+		journal_entry.etsy_ledger_entry_id = cstr(entry.entry_id)
+		journal_entry.user_remark = f"Etsy {description} of {abs(amount):.2f} {ledger_currency} ({self.name}), ledger entry {entry.entry_id}"
+
+		rows = [
+			LedgerRow(self.payout_account, -amount, f"Etsy {description} {entry.entry_id}"),
+			LedgerRow(self.bank_account, amount, f"Etsy {description} {entry.entry_id}"),
+		]
+		self.append_ledger_rows(journal_entry, rows, ledger_currency, posting_date)
+
+		journal_entry.flags.ignore_permissions = True
+		journal_entry.insert(ignore_permissions=True)
+		if self.payout_journal_entry_submit:
+			journal_entry.submit()
+
+		return journal_entry.name
+
+	def append_ledger_rows(
+		self, journal_entry: Document, rows: list[LedgerRow], ledger_currency: str, posting_date
+	):
+		"""
+		Append balanced ledger currency rows to a Journal Entry, converting to the currency of each
+		account (ledger or company currency) and absorbing rounding differences.
+		"""
+		company_currency = erpnext.get_company_currency(self.company)
+		cost_center = self.fee_cost_center or erpnext.get_default_cost_center(self.company)
+
+		exchange_rate = 1.0
+		if ledger_currency != company_currency:
+			exchange_rate = flt(get_exchange_rate(ledger_currency, company_currency, posting_date))
+			if not exchange_rate:
+				frappe.throw(
+					_("No exchange rate found from {0} to {1} for {2}.").format(
+						ledger_currency, company_currency, posting_date
+					)
+				)
+
+		try:
+			account_rows = build_journal_rows(
+				rows,
+				ledger_currency,
+				company_currency,
+				exchange_rate,
+				account_currency_of=lambda account: frappe.get_cached_value(
+					"Account", account, "account_currency"
+				),
+				rounding_account=frappe.get_cached_value(
+					"Company", self.company, "exchange_gain_loss_account"
+				),
+			)
+		except ValueError as e:
+			frappe.throw(str(e))
+
+		multi_currency = False
+		for row in account_rows:
+			row.pop("company_amount", None)
+			multi_currency = multi_currency or row["account_currency"] != company_currency
+			row["cost_center"] = cost_center
+			journal_entry.append("accounts", row)
+		journal_entry.multi_currency = int(multi_currency)
+
 
 ### background job entry points for enqueued imports
 def run_import_listings(user, etsy_shop, listing_state="active", include_attributes=1, include_items=0):
@@ -605,6 +997,101 @@ def run_import_receipts(user, etsy_shop, min_date=None, max_date=None):
 		},
 		user=user,
 	)
+
+
+def run_book_ledger(user, etsy_shop, from_date, to_date=None, fees=1, payouts=1):
+	"""
+	Book one Journal Entry per month in the period. Each month is committed on its own, so a failure
+	part way through keeps the months already booked.
+	"""
+	shop: EtsyShop = frappe.get_doc("Etsy Shop", etsy_shop)
+	fees, payouts = cint(fees), cint(payouts)
+	months = months_between(from_date, to_date or from_date)
+
+	created_fees: list[tuple[str, str]] = []
+	empty_months: list[str] = []
+	skipped: list[tuple[str, str]] = []
+	payout_entries: list[str] = []
+	failed: list[str] = []
+
+	for year, month in months:
+		period = shop.fee_period(year, month)
+		existing = shop.get_fee_journal_entry(etsy_shop, year, month) if fees else None
+		if existing:
+			skipped.append((period, existing))
+
+		try:
+			result = shop.book_ledger_month(
+				year, month, fees=bool(fees and not existing), payouts=bool(payouts)
+			)
+			frappe.db.commit()
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(f"Etsy: Failed to book ledger {period} for shop {etsy_shop}")
+			failed.append(period)
+			continue
+
+		if fees and not existing:
+			if result["fee_journal_entry"]:
+				created_fees.append((period, result["fee_journal_entry"]))
+			else:
+				empty_months.append(period)
+		payout_entries.extend(result["payout_journal_entries"])
+
+	frappe.publish_realtime(
+		"msgprint",
+		{
+			"message": book_ledger_summary(
+				etsy_shop, months, created_fees, empty_months, skipped, payout_entries, failed, payouts
+			),
+			"indicator": "red" if failed else ("orange" if skipped else "green"),
+			"alert": True,
+		},
+		user=user,
+	)
+
+
+def book_ledger_summary(
+	etsy_shop, months, created_fees, empty_months, skipped, payout_entries, failed, payouts=1
+) -> str:
+	"""Readable result of a (possibly multi month) ledger booking."""
+
+	def entry_links(entries, limit=12):
+		links = [get_link_to_form("Journal Entry", name) for _, name in entries[:limit]]
+		if len(entries) > limit:
+			links.append(_("and {0} more").format(len(entries) - limit))
+		return ", ".join(links)
+
+	period = f"{months[0][0]:04d}-{months[0][1]:02d}"
+	if len(months) > 1:
+		period += f" to {months[-1][0]:04d}-{months[-1][1]:02d}"
+	lines = [_("Etsy ledger {0} for {1}:").format(period, etsy_shop)]
+
+	if created_fees:
+		lines.append(
+			_("{0} fee Journal Entries created: {1}").format(len(created_fees), entry_links(created_fees))
+		)
+	if empty_months:
+		lines.append(_("No Etsy fees found for: {0}").format(", ".join(empty_months)))
+	if skipped:
+		lines.append(
+			_("Already booked, left untouched: {0}").format(
+				", ".join(f"{p} ({get_link_to_form('Journal Entry', n)})" for p, n in skipped[:12])
+			)
+		)
+	if payout_entries:
+		lines.append(
+			_("{0} payout Journal Entries created: {1}").format(
+				len(payout_entries),
+				entry_links([(None, n) for n in payout_entries]),
+			)
+		)
+	elif payouts and not failed:
+		lines.append(_("No new Etsy payouts found."))
+	if failed:
+		lines.append(_("Failed (see Error Log): {0}").format(", ".join(failed)))
+
+	return "<br>".join(lines)
 
 
 ### public functions

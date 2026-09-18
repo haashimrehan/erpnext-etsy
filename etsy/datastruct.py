@@ -585,7 +585,8 @@ class LedgerEntry(BaseModel):
 	- created_timestamp: `int >= 946684800` The date and time the ledger entry was created in Epoch seconds.
 	- ledger_type: `str` The original reference type for the ledger entry.
 	- reference_type: `str` The object type the ledger entry refers to.
-	- reference_id: `int` The object id the ledger entry refers to. `Nullable`
+	- reference_id: `str` The object id the ledger entry refers to. `Nullable`
+	- parent_entry_id: `int` The parent ledger entry, used to match a tax entry to the fee it was charged on. `Nullable`
 	- payment_adjustments: `List[TODO]` List of refund objects on an Etsy Payments transaction. All monetary amounts are in USD pennies unless otherwise specified.
 	"""
 
@@ -598,10 +599,11 @@ class LedgerEntry(BaseModel):
 	balance: int
 	create_date: int
 	created_timestamp: datetime
-	ledger_type: str
-	reference_type: str
-	reference_id: int | None
-	payment_adjustments: list[dict]  # TODO: define PaymentAdjustment object
+	ledger_type: str | None = None
+	reference_type: str | None = None
+	reference_id: int | str | None = None  # declared as a string by Etsy, an int in live responses
+	parent_entry_id: int | None = None  # e.g. links vat_seller_services to the originating fee
+	payment_adjustments: list[dict] | None = None  # TODO: define PaymentAdjustment object
 
 	@field_validator(
 		"create_date",

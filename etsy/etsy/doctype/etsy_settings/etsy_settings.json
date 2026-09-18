@@ -17,7 +17,19 @@
   "item_last_sync",
   "column_break_mpox",
   "item_scheduler_link",
-  "item_next_sync"
+  "item_next_sync",
+  "fee_section",
+  "fee_journal_day",
+  "fee_last_sync",
+  "column_break_fees",
+  "fee_scheduler_link",
+  "fee_next_sync",
+  "payout_section",
+  "payout_sync_interval",
+  "payout_last_sync",
+  "column_break_payout",
+  "payout_scheduler_link",
+  "payout_next_sync"
  ],
  "fields": [
   {
@@ -111,12 +123,98 @@
    "fieldname": "sales_order_section",
    "fieldtype": "Section Break",
    "label": "Sales Order - Synchronisation"
+  },
+  {
+   "depends_on": "etsy_enabled",
+   "fieldname": "fee_section",
+   "fieldtype": "Section Break",
+   "label": "Fees - Monthly Journal Entry"
+  },
+  {
+   "default": "1",
+   "description": "Day of month on which the fee Journal Entry for the previous month is created. Range: [1-28].\nSet to 0 to disable.",
+   "fieldname": "fee_journal_day",
+   "fieldtype": "Int",
+   "label": "Day of Month",
+   "mandatory_depends_on": "etsy_enabled",
+   "non_negative": 1
+  },
+  {
+   "depends_on": "fee_scheduler_link",
+   "fieldname": "fee_last_sync",
+   "fieldtype": "Datetime",
+   "is_virtual": 1,
+   "label": "Last Run",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_fees",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Scheduled Job Type",
+   "fieldname": "fee_scheduler_link",
+   "fieldtype": "Link",
+   "label": "Scheduler Link",
+   "options": "Scheduled Job Type",
+   "read_only": 1
+  },
+  {
+   "depends_on": "fee_scheduler_link",
+   "fieldname": "fee_next_sync",
+   "fieldtype": "Datetime",
+   "is_virtual": 1,
+   "label": "Next Run",
+   "read_only": 1
+  },
+  {
+   "depends_on": "etsy_enabled",
+   "fieldname": "payout_section",
+   "fieldtype": "Section Break",
+   "label": "Payouts - Journal Entries"
+  },
+  {
+   "default": "1",
+   "description": "in days. Range: [1-30].\nSet to 0 to disable.\nBooks new Etsy payouts of the last 45 days for shops with a Payout Account.",
+   "fieldname": "payout_sync_interval",
+   "fieldtype": "Int",
+   "label": "Sync Interval",
+   "mandatory_depends_on": "etsy_enabled",
+   "non_negative": 1
+  },
+  {
+   "depends_on": "payout_scheduler_link",
+   "fieldname": "payout_last_sync",
+   "fieldtype": "Datetime",
+   "is_virtual": 1,
+   "label": "Last Sync",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_payout",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Scheduled Job Type",
+   "fieldname": "payout_scheduler_link",
+   "fieldtype": "Link",
+   "label": "Scheduler Link",
+   "options": "Scheduled Job Type",
+   "read_only": 1
+  },
+  {
+   "depends_on": "payout_scheduler_link",
+   "fieldname": "payout_next_sync",
+   "fieldtype": "Datetime",
+   "is_virtual": 1,
+   "label": "Next Sync",
+   "read_only": 1
   }
  ],
  "grid_page_length": 50,
  "issingle": 1,
  "links": [],
- "modified": "2026-01-20 10:06:23.593196",
+ "modified": "2026-09-17 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Etsy",
  "name": "Etsy Settings",

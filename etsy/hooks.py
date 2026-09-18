@@ -46,6 +46,38 @@ etsy_custom_fields = {
 			"unique": 1,
 		}
 	],
+	"Journal Entry": [
+		{
+			"fieldname": "etsy_shop",
+			"label": "Etsy Shop",
+			"fieldtype": "Link",
+			"options": "Etsy Shop",
+			"insert_after": "naming_series",
+			"read_only": 1,
+			"no_copy": 1,
+		},
+		{
+			"fieldname": "etsy_fee_period",
+			"label": "Etsy Fee Period",
+			"fieldtype": "Data",
+			"insert_after": "etsy_shop",
+			"read_only": 1,
+			"no_copy": 1,
+			"depends_on": "etsy_shop",
+			"description": "Month (YYYY-MM) of the Etsy fees booked by this Journal Entry.",
+		},
+		{
+			"fieldname": "etsy_ledger_entry_id",
+			"label": "Etsy Ledger Entry ID",
+			"fieldtype": "Data",
+			"insert_after": "etsy_fee_period",
+			"read_only": 1,
+			"no_copy": 1,
+			"unique": 1,
+			"depends_on": "etsy_shop",
+			"description": "Etsy payment account ledger entry (payout) booked by this Journal Entry.",
+		},
+	],
 	"Item": [
 		{
 			"fieldname": "etsy_product_id",

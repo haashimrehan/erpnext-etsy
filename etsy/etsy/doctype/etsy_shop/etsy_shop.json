@@ -41,6 +41,19 @@
   "income_account_physical",
   "income_account_digital",
   "discount_account",
+  "fee_settings_section",
+  "fees_expense_account",
+  "marketing_expense_account",
+  "shipping_expense_account",
+  "fee_cost_center",
+  "column_break_fees",
+  "other_expense_account",
+  "fee_tax_account",
+  "fee_journal_entry_submit",
+  "payout_section",
+  "payout_account",
+  "column_break_payout",
+  "payout_journal_entry_submit",
   "customer_settings_section",
   "customer_naming_series",
   "customer_group",
@@ -324,16 +337,99 @@
    "read_only": 1
   },
   {
+   "description": "Account that receives Etsy payments (Etsy Payments balance). Credited by the monthly fee Journal Entry.",
    "fieldname": "bank_account",
    "fieldtype": "Link",
    "label": "Bank Account",
    "options": "Account",
    "reqd": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "fee_settings_section",
+   "fieldtype": "Section Break",
+   "label": "Fee & Payout Settings (Journal Entries)"
+  },
+  {
+   "description": "Listing, transaction, payment processing and regulatory operating fees. Required to create the monthly fee Journal Entry - also used as fallback for all other categories.",
+   "fieldname": "fees_expense_account",
+   "fieldtype": "Link",
+   "label": "Etsy Fees Expense Account",
+   "options": "Account"
+  },
+  {
+   "description": "Etsy Ads and Offsite Ads. Falls back to the Etsy Fees Expense Account.",
+   "fieldname": "marketing_expense_account",
+   "fieldtype": "Link",
+   "label": "Marketing Expense Account",
+   "options": "Account"
+  },
+  {
+   "description": "Postage labels bought through Etsy. Falls back to the Etsy Fees Expense Account.",
+   "fieldname": "shipping_expense_account",
+   "fieldtype": "Link",
+   "label": "Shipping Label Expense Account",
+   "options": "Account"
+  },
+  {
+   "description": "Company default Cost Center will be used if not set.",
+   "fieldname": "fee_cost_center",
+   "fieldtype": "Link",
+   "label": "Cost Center for fees",
+   "options": "Cost Center"
+  },
+  {
+   "fieldname": "column_break_fees",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Any other charge on the payment account that cannot be classified. Falls back to the Etsy Fees Expense Account.",
+   "fieldname": "other_expense_account",
+   "fieldtype": "Link",
+   "label": "Other Expense Account",
+   "options": "Account"
+  },
+  {
+   "description": "VAT / tax charged on seller fees. Leave empty to book the tax to the same expense account as the fee it belongs to.",
+   "fieldname": "fee_tax_account",
+   "fieldtype": "Link",
+   "label": "Tax on Seller Fees Account",
+   "options": "Account"
+  },
+  {
+   "default": "0",
+   "description": "If unchecked the monthly Journal Entry is saved as draft for review.",
+   "fieldname": "fee_journal_entry_submit",
+   "fieldtype": "Check",
+   "label": "Submit Journal Entry automatically"
+  },
+  {
+   "fieldname": "payout_section",
+   "fieldtype": "Section Break",
+   "label": "Payouts"
+  },
+  {
+   "description": "Bank account that receives Etsy payouts (e.g. Wise USD). Each payout is booked as a Bank Entry from the Bank Account (Etsy clearing) to this account. Leave empty to skip payout Journal Entries.",
+   "fieldname": "payout_account",
+   "fieldtype": "Link",
+   "label": "Payout Account",
+   "options": "Account"
+  },
+  {
+   "fieldname": "column_break_payout",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "description": "If unchecked payout Journal Entries are saved as draft for review.",
+   "fieldname": "payout_journal_entry_submit",
+   "fieldtype": "Check",
+   "label": "Submit Payout Journal Entries automatically"
   }
  ],
  "grid_page_length": 50,
  "links": [],
- "modified": "2026-02-25 15:29:47.428401",
+ "modified": "2026-09-17 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Etsy",
  "name": "Etsy Shop",

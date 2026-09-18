@@ -76,6 +76,27 @@ Token Type,Token-Typ,
 Unit of Measure,Maßeinheit,
 Use localhost,Localhost verwenden,
 Views,Aufrufe,
+Fee & Payout Settings (Journal Entries),Gebühren- & Auszahlungseinstellungen (Buchungssätze),
+Etsy Fees Expense Account,Aufwandskonto Etsy-Gebühren,
+Marketing Expense Account,Aufwandskonto Marketing,
+Shipping Label Expense Account,Aufwandskonto Versandetiketten,
+Other Expense Account,Aufwandskonto Sonstiges,
+Tax on Seller Fees Account,Konto für Steuern auf Verkäufergebühren,
+Cost Center for fees,Kostenstelle für Gebühren,
+Submit Journal Entry automatically,Buchungssatz automatisch buchen,
+If unchecked the monthly Journal Entry is saved as draft for review.,Wenn nicht aktiviert wird der monatliche Buchungssatz als Entwurf zur Prüfung gespeichert.,
+Fees - Monthly Journal Entry,Gebühren - Monatlicher Buchungssatz,
+Day of Month,Tag des Monats,
+Last Run,Letzte Ausführung,
+Next Run,Nächste Ausführung,
+Fee Journal Entries,Gebühren-Buchungssätze,
+Etsy Fee Period,Etsy Gebührenzeitraum,
+Payouts,Auszahlungen,
+Payout Account,Auszahlungskonto,
+Submit Payout Journal Entries automatically,Auszahlungs-Buchungssätze automatisch buchen,
+If unchecked payout Journal Entries are saved as draft for review.,Wenn nicht aktiviert werden Auszahlungs-Buchungssätze als Entwurf zur Prüfung gespeichert.,
+Payouts - Journal Entries,Auszahlungen - Buchungssätze,
+Etsy Ledger Entry ID,Etsy Kontobewegungs-ID,
 
 # JS/Python translations (with quotes - commas in texts allowed)
 "'listing_state' must be one of: {0}","'listing_state' muss einer der folgenden sein: {0}",""
@@ -110,3 +131,31 @@ Views,Aufrufe,
 "Synchronisation is not enabled! 'Etsy Settings > Enable Synchronisation'","Synchronisation ist nicht aktiviert! 'Etsy-Einstellungen > Synchronisation aktivieren'",""
 "To","Bis","date"
 "You will need to login again with '{}' before next use!","Sie müssen sich vor der nächsten Verwendung erneut mit '{}' anmelden!",""
+"Etsy Fees & Payouts","Etsy-Gebühren & Auszahlungen",""
+"Book Etsy Fees & Payouts","Etsy-Gebühren & Auszahlungen buchen",""
+"Create","Erstellen",""
+"Book","Buchen",""
+"Month","Monat",""
+"Any date within the month whose Etsy ledger should be booked.","Ein beliebiges Datum innerhalb des Monats, dessen Etsy-Kontobewegungen gebucht werden sollen.",""
+"Etsy ledger booking has been queued.","Buchung der Etsy-Kontobewegungen wurde gestartet.",""
+"Failed to queue Etsy ledger booking!","Buchung der Etsy-Kontobewegungen konnte nicht gestartet werden!",""
+"Please set the 'Etsy Fees Expense Account' and / or the 'Payout Account' in the Fee & Payout Settings section first.","Bitte legen Sie zuerst das 'Aufwandskonto Etsy-Gebühren' und / oder das 'Auszahlungskonto' im Abschnitt Gebühren- & Auszahlungseinstellungen fest.",""
+"Please set the 'Etsy Fees Expense Account' in the Fee Settings of Etsy Shop {0}.","Bitte legen Sie das 'Aufwandskonto Etsy-Gebühren' in den Gebühreneinstellungen des Etsy-Shops {0} fest.",""
+"Please set the 'Bank Account' of Etsy Shop {0}.","Bitte legen Sie das 'Bankkonto' des Etsy-Shops {0} fest.",""
+"A fee Journal Entry for {0} already exists: {1}","Ein Gebühren-Buchungssatz für {0} existiert bereits: {1}",""
+"Fee Journal Entry {0} created for {1} ({2}).","Gebühren-Buchungssatz {0} für {1} ({2}) erstellt.",""
+"No Etsy fees found for {0} ({1}).","Keine Etsy-Gebühren für {0} ({1}) gefunden.",""
+"Failed to book the Etsy ledger for {0}. See Error Log.","Die Etsy-Kontobewegungen für {0} konnten nicht gebucht werden. Siehe Fehlerprotokoll.",""
+"Etsy fees deducted from payment account","Vom Zahlungskonto abgezogene Etsy-Gebühren",""
+"Etsy ledger entries with mixed currencies are not supported: {0}","Etsy-Kontobewegungen mit gemischten Währungen werden nicht unterstützt: {0}",""
+"No exchange rate found from {0} to {1} for {2}.","Kein Wechselkurs von {0} nach {1} für {2} gefunden.",""
+"Account {0} is held in {1}, but Etsy fees are in {2}.","Konto {0} wird in {1} geführt, die Etsy-Gebühren sind jedoch in {2}.",""
+"Book Fees","Gebühren buchen",""
+"Book Payouts","Auszahlungen buchen",""
+"One Journal Entry per shop and month with all Etsy fees.","Ein Buchungssatz pro Shop und Monat mit allen Etsy-Gebühren.",""
+"One Bank Entry per Etsy payout from the Bank Account to the Payout Account.","Eine Bankbuchung pro Etsy-Auszahlung vom Bankkonto auf das Auszahlungskonto.",""
+"Please set the 'Payout Account' in the Fee Settings of Etsy Shop {0}.","Bitte legen Sie das 'Auszahlungskonto' in den Gebühreneinstellungen des Etsy-Shops {0} fest.",""
+"'Payout Account' and 'Bank Account' must be different accounts.","'Auszahlungskonto' und 'Bankkonto' müssen unterschiedliche Konten sein.",""
+"Select at least one of 'Book Fees' and 'Book Payouts'.","Wählen Sie mindestens eine der Optionen 'Gebühren buchen' und 'Auszahlungen buchen'.",""
+"{0} payout Journal Entries created for {1}: {2}","{0} Auszahlungs-Buchungssätze für {1} erstellt: {2}",""
+"No new Etsy payouts found for {0} ({1}).","Keine neuen Etsy-Auszahlungen für {0} ({1}) gefunden.",""

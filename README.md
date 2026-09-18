@@ -21,6 +21,8 @@
   Automatically retrieves missing item details (title, description, images, attributes, variants, pricing, etc.) directly from your Etsy shop to populate or complete records in ERPNext - The **Etsy Listing** doctype allows configuration and management on a per listing level.
 - ✅ **Import Sales History**  
   Bulk import historical Etsy orders (back to a chosen date) to bring your ERPNext records up to date quickly — ideal during initial setup or after a period of disconnection.
+- ✅ **Fees & Payouts as Journal Entries**  
+  Books all Etsy fees of a month (listing, transaction & processing fees, Etsy Ads / Offsite Ads, postage labels, tax on fees) from the Etsy payment account ledger as one **Journal Entry** per shop — split across configurable expense accounts and credited against the shop's Etsy clearing account. Every Etsy payout becomes a **Bank Entry** from the clearing account to your payout bank account, ready for bank reconciliation. Multi-currency aware (e.g. USD shop, CAD books). Runs automatically or on demand.
 - ✅ **Multi-Shop Support**  
   Connect and manage **multiple** Etsy shops from a single ERPNext instance. Each shop can have its own configuration, credentials, and settings.
 - ✅ **Configurable Sync Scheduling**  
@@ -47,3 +49,4 @@ bench --site $SITE_NAME install-app etsy
   - Enter your Etsy API Keystring and Shared Secret to ERP Etsy Shop API section
   - Click the Login Button to start OAuth2 flow
 - Go to **Etsy Settings** to enable and configure automatic sync
+- Optional: set the expense accounts and the payout account in the **Fee & Payout Settings** section of the Etsy Shop to have Etsy fees and payouts booked as Journal Entries

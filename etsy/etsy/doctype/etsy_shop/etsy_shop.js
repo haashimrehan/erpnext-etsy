@@ -163,6 +163,107 @@ frappe.ui.form.on("Etsy Shop", {
 					__("Import")
 				);
 
+				frm.add_custom_button(
+					__("Etsy Fees & Payouts"),
+					async () => {
+						if (!frm.doc.fees_expense_account && !frm.doc.payout_account) {
+							frappe.msgprint({
+								message: __(
+									"Please set the 'Etsy Fees Expense Account' and / or the 'Payout Account' in the Fee & Payout Settings section first."
+								),
+								indicator: "red",
+							});
+							return;
+						}
+						const last_month = frappe.datetime.add_months(
+							frappe.datetime.month_start(),
+							-1
+						);
+						frappe.prompt(
+							[
+								{
+									label: __("From Month"),
+									fieldname: "from_date",
+									fieldtype: "Date",
+									default: last_month,
+									reqd: 1,
+									description: __(
+										"Any date within the first month to book."
+									),
+								},
+								{
+									label: __("To Month"),
+									fieldname: "to_date",
+									fieldtype: "Date",
+									default: last_month,
+									reqd: 1,
+									description: __(
+										"Any date within the last month to book. One Journal Entry is created per month, dated in that month. Months already booked are left untouched."
+									),
+								},
+								{
+									label: __("Book Fees"),
+									fieldname: "fees",
+									fieldtype: "Check",
+									default: frm.doc.fees_expense_account ? 1 : 0,
+									read_only: frm.doc.fees_expense_account ? 0 : 1,
+									description: __(
+										"One Journal Entry per shop and month with all Etsy fees."
+									),
+								},
+								{
+									label: __("Book Payouts"),
+									fieldname: "payouts",
+									fieldtype: "Check",
+									default: frm.doc.payout_account ? 1 : 0,
+									read_only: frm.doc.payout_account ? 0 : 1,
+									description: __(
+										"One Bank Entry per Etsy payout from the Bank Account to the Payout Account."
+									),
+								},
+							],
+							(values) => {
+								frappe.call({
+									method: "enqueue_book_ledger",
+									doc: frm.doc,
+									args: {
+										from_date: values.from_date,
+										to_date: values.to_date,
+										fees: values.fees,
+										payouts: values.payouts,
+									},
+									callback: (r) => {
+										frappe.show_alert(
+											{
+												message: __(
+													"Etsy ledger booking queued for {0} month(s).",
+													[r.message || 1]
+												),
+												indicator: "blue",
+											},
+											5
+										);
+									},
+									error: () => {
+										frappe.show_alert(
+											{
+												message: __(
+													"Failed to queue Etsy ledger booking!"
+												),
+												indicator: "red",
+											},
+											5
+										);
+									},
+								});
+							},
+							__("Book Etsy Fees & Payouts"),
+							__("Book")
+						);
+					},
+					__("Create")
+				);
+
 				frm.add_custom_button(__("Disconnect"), async () => {
 					frappe.warn(
 						__("Are you sure you want to proceed?"),

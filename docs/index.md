@@ -21,6 +21,7 @@ The Etsy Integration app connects your Etsy shop(s) to ERPNext, enabling automat
 - **Orders & Receipts** — Sales Orders, Sales Invoices, and Payment Entries
 - **Customers & Contacts** — Buyer information and addresses
 - **Listings & Items** — Product catalog with variants and attributes
+- **Fees & Expenses** — Monthly Journal Entry booking Etsy fees, ads and taxes on fees
 
 Built on the Frappe framework and designed specifically for ERPNext v15, this integration uses Etsy's official API v3 with secure OAuth2 authentication.
 
@@ -28,6 +29,7 @@ Built on the Frappe framework and designed specifically for ERPNext v15, this in
 
 - **Sales Order Automation** — Import Etsy orders as complete Sales Orders with Customers, Invoices, and Payment Entries
 - **Listing Management** — Sync product listings with automatic Item Template, Variant, and Attribute creation
+- **Fee Booking** — Etsy fees, marketing costs and taxes on fees are booked monthly as a Journal Entry against configurable expense accounts
 - **Multi-Shop Support** — Manage multiple Etsy shops from a single ERPNext instance with independent configuration
 - **Flexible Sync** — Manual on-demand imports, scheduled background jobs, or bulk historical imports
 - **Secure Auth** — OAuth 2.0 PKCE flow with automatic token refresh

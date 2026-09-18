@@ -25,8 +25,13 @@ Current limitations of the Etsy Integration.
 
 ## Shipping Labels
 
-- Shipping labels from Etsy are not imported
+- Shipping labels from Etsy are not imported (their cost is booked by the monthly fee Journal Entry, see [Fees & Expenses](fees-and-expenses.md))
 - Tracking numbers are not automatically synced to ERPNext
+
+## Fees
+
+- Fee entries are classified by their Etsy ledger type; unknown fee types are booked to the "Other" (or "Fees") category
+- Fees are booked once per month, not per order
 
 ## Multiple Currencies
 

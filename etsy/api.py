@@ -426,3 +426,59 @@ def synchronise_listings():
 		except Exception:
 			frappe.db.rollback()
 			frappe.log_error(f"Etsy: Failed to sync listings for shop {shop.name}")
+
+
+def synchronise_fees(year: int | None = None, month: int | None = None):
+	"""
+	This function will be executed monthly by the Scheduler to book the Etsy ledger of the previous
+	month: the fee Journal Entry for every connected shop with a fee expense account, and the
+	payout Journal Entries for shops with a payout account (from the same ledger download).
+	"""
+	if not (year and month):
+		last_month = frappe.utils.add_days(frappe.utils.get_first_day(frappe.utils.today()), -1)
+		year, month = last_month.year, last_month.month
+
+	shop_list = frappe.get_all(
+		"Etsy Shop", fields=["name", "status", "fees_expense_account", "payout_account"]
+	)
+
+	for shop in shop_list:
+		fees = bool(shop.fees_expense_account)
+		payouts = bool(shop.payout_account)
+		if shop.status != "Connected" or not (fees or payouts):
+			continue
+		try:
+			etsy_shop: EtsyShop = frappe.get_doc("Etsy Shop", shop.name)
+			etsy_shop.book_ledger_month(year, month, fees=fees, payouts=payouts)
+			frappe.db.commit()
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(f"Etsy: Failed to book ledger {year}-{month:02d} for shop {shop.name}")
+
+
+# Must be at least the largest payout sync interval (30 days) so a missed run leaves no gap.
+# Etsy rejects ledger windows longer than 31 days, so this spans more than one request;
+# EtsyShop.fetch_ledger_entries splits it into legal windows.
+PAYOUT_LOOKBACK_DAYS = 35
+
+
+def synchronise_payouts():
+	"""
+	This function will be regularly executed by the Scheduler to book new Etsy payouts (deposits)
+	of the last weeks as Bank Entries for every connected shop with a payout account.
+	"""
+	to_date = frappe.utils.today()
+	from_date = frappe.utils.add_days(to_date, -PAYOUT_LOOKBACK_DAYS)
+
+	shop_list = frappe.get_all("Etsy Shop", fields=["name", "status", "payout_account"])
+
+	for shop in shop_list:
+		if shop.status != "Connected" or not shop.payout_account:
+			continue
+		try:
+			etsy_shop: EtsyShop = frappe.get_doc("Etsy Shop", shop.name)
+			etsy_shop.create_payout_journal_entries(etsy_shop.fetch_ledger_entries(from_date, to_date))
+			frappe.db.commit()
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(f"Etsy: Failed to book payouts for shop {shop.name}")

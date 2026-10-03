@@ -8,6 +8,14 @@ PAYOUTS_SCHEDULED_JOB_TYPE_METHOD = "etsy.api.synchronise_payouts"
 FEES_JOB_HOUR = 3  # hour of the day at which the monthly fee Journal Entry job runs
 PAYOUTS_JOB_HOUR = 4  # hour of the day at which the payout Journal Entry job runs
 
+# (link field on Etsy Settings, method the job runs)
+JOBS = (
+	("sales_order_scheduler_link", RECEIPTS_SCHEDULED_JOB_TYPE_METHOD),
+	("item_scheduler_link", LISTINGS_SCHEDULED_JOB_TYPE_METHOD),
+	("fee_scheduler_link", FEES_SCHEDULED_JOB_TYPE_METHOD),
+	("payout_scheduler_link", PAYOUTS_SCHEDULED_JOB_TYPE_METHOD),
+)
+
 
 class EtsySettings(Document):
 	@property
@@ -46,54 +54,55 @@ class EtsySettings(Document):
 		### payouts
 		payout_interval = min(max(0, self.payout_sync_interval or 0), 30)
 		self.payout_sync_interval = payout_interval
-
-		payout_job = self.get_scheduler(self.payout_scheduler_link)
-		payout_job.method = PAYOUTS_SCHEDULED_JOB_TYPE_METHOD
-		payout_job.frequency = "Cron"
-		payout_job.cron_format = f"0 {PAYOUTS_JOB_HOUR} */{max(1, payout_interval)} * *"  # runs every X days
-		payout_job.stopped = 1 - (self.etsy_enabled * min(1, payout_interval))
-		payout_job.save()
-
-		self.payout_scheduler_link = payout_job.name
+		self.configure_job(
+			"payout_scheduler_link",
+			PAYOUTS_SCHEDULED_JOB_TYPE_METHOD,
+			f"0 {PAYOUTS_JOB_HOUR} */{max(1, payout_interval)} * *",  # runs every X days
+			payout_interval,
+		)
 
 		### fees
 		fee_day = min(max(0, self.fee_journal_day or 0), 28)
 		self.fee_journal_day = fee_day
-
-		fee_job = self.get_scheduler(self.fee_scheduler_link)
-		fee_job.method = FEES_SCHEDULED_JOB_TYPE_METHOD
-		fee_job.frequency = "Cron"
-		fee_job.cron_format = f"0 {FEES_JOB_HOUR} {max(1, fee_day)} * *"  # runs monthly on day X
-		fee_job.stopped = 1 - (self.etsy_enabled * min(1, fee_day))
-		fee_job.save()
-
-		self.fee_scheduler_link = fee_job.name
+		self.configure_job(
+			"fee_scheduler_link",
+			FEES_SCHEDULED_JOB_TYPE_METHOD,
+			f"0 {FEES_JOB_HOUR} {max(1, fee_day)} * *",  # runs monthly on day X
+			fee_day,
+		)
 
 		### receipts
-		sales_order_interval = min(max(0, self.sales_order_sync_interval), 60)
+		sales_order_interval = min(max(0, self.sales_order_sync_interval or 0), 60)
 		self.sales_order_sync_interval = sales_order_interval
-
-		sales_order_job = self.get_scheduler(self.sales_order_scheduler_link)
-		sales_order_job.method = RECEIPTS_SCHEDULED_JOB_TYPE_METHOD
-		sales_order_job.frequency = "Cron"
-		sales_order_job.cron_format = f"*/{max(1, sales_order_interval)} * * * *"  # runs every X minutes
-		sales_order_job.stopped = 1 - (self.etsy_enabled * min(1, sales_order_interval))
-		sales_order_job.save()
-
-		self.sales_order_scheduler_link = sales_order_job.name
+		self.configure_job(
+			"sales_order_scheduler_link",
+			RECEIPTS_SCHEDULED_JOB_TYPE_METHOD,
+			f"*/{max(1, sales_order_interval)} * * * *",  # runs every X minutes
+			sales_order_interval,
+		)
 
 		### listings
-		item_interval = min(max(0, self.item_sync_interval), 24)
+		item_interval = min(max(0, self.item_sync_interval or 0), 24)
 		self.item_sync_interval = item_interval
+		self.configure_job(
+			"item_scheduler_link",
+			LISTINGS_SCHEDULED_JOB_TYPE_METHOD,
+			f"0 */{max(1, item_interval)} * * *",  # runs every X hours
+			item_interval,
+		)
 
-		item_job = self.get_scheduler(self.item_scheduler_link)
-		item_job.method = LISTINGS_SCHEDULED_JOB_TYPE_METHOD
-		item_job.frequency = "Cron"
-		item_job.cron_format = f"0 */{max(1, item_interval)} * * *"  # runs every X hours
-		item_job.stopped = 1 - (self.etsy_enabled * min(1, item_interval))
-		item_job.save()
-
-		self.item_scheduler_link = item_job.name
+	def configure_job(self, link_field, method, cron_format, setting):
+		"Create/update the Scheduled Job Type behind `link_field`; a setting of 0 stops it."
+		job = self.get_scheduler(self.get(link_field))
+		job.method = method
+		job.frequency = "Cron"
+		job.cron_format = cron_format
+		job.stopped = 1 - (self.etsy_enabled * min(1, setting))
+		# Tag the job with a Scheduler Event. Jobs that are neither in hooks.py nor tagged
+		# like this get deleted by `bench migrate` (sync_jobs -> clear_events).
+		job.scheduler_event = get_scheduler_event(method)
+		job.save(ignore_permissions=True)
+		self.set(link_field, job.name)
 
 	def get_scheduler(self, scheduler_link):
 		"Return `Scheduled Job Type` if it exists, else create a new one"
@@ -101,3 +110,13 @@ class EtsySettings(Document):
 			return frappe.get_doc("Scheduled Job Type", scheduler_link)
 		else:
 			return frappe.new_doc("Scheduled Job Type")
+
+
+def get_scheduler_event(method):
+	"Return the Scheduler Event for `method`, creating it if needed."
+	filters = {"scheduled_against": "Etsy Settings", "method": method}
+	if name := frappe.db.get_value("Scheduler Event", filters):
+		return name
+	event = frappe.get_doc({"doctype": "Scheduler Event", **filters})
+	event.insert(ignore_permissions=True)
+	return event.name

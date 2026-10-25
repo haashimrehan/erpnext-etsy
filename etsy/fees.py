@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import date
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
@@ -65,7 +66,7 @@ LEDGER_TYPE_RULES: tuple[tuple[str, str], ...] = (
 	### money movement - never an expense of the seller
 	("payment_gross", TRANSFER),  # a buyer payment landing on the Etsy balance
 	("payment_net", TRANSFER),
-	("billing_payment", TRANSFER),  # the seller settling an Etsy bill by card
+	("billing_payment", TRANSFER),  # the seller settling an Etsy bill by card - see is_bill_payment
 	("bill_payment", TRANSFER),
 	("sales_tax", TRANSFER),  # marketplace facilitator tax Etsy collects from buyers and remits
 	("disburse", TRANSFER),  # DISBURSE2 / disbursement - booked separately as payouts
@@ -202,6 +203,86 @@ def is_payout(entry: LedgerLike | LedgerEntry) -> bool:
 
 	description = (entry.description or "").strip().lower()
 	return description.startswith(PAYOUT_DESCRIPTION_PREFIXES)
+
+
+### Bill payments
+
+# When the Etsy balance turns negative Etsy charges the card on file to settle it. The live API
+# returns the token ``billing_payment`` (a positive amount: money into the Etsy balance); older
+# shops and the docs also call it a bill payment or recoupment.
+BILL_PAYMENT_PATTERNS = ("billing_payment", "bill_payment", "recoupment")
+BILL_PAYMENT_DESCRIPTION_PREFIXES = ("billing payment", "bill payment", "recoupment")
+
+
+def is_bill_payment(entry: LedgerLike | LedgerEntry) -> bool:
+	"""True for a card charge that settles a negative Etsy balance (money into the Etsy balance)."""
+	if not entry.amount or entry.amount < 0:
+		return False
+
+	ledger_type = (entry.ledger_type or "").strip().lower()
+	if any(pattern in ledger_type for pattern in BILL_PAYMENT_PATTERNS):
+		return True
+
+	description = (entry.description or "").strip().lower()
+	return description.startswith(BILL_PAYMENT_DESCRIPTION_PREFIXES)
+
+
+### Bank transaction matching
+
+
+@dataclass(frozen=True)
+class BankLine:
+	"""The subset of an ERPNext Bank Transaction needed to match it to an Etsy ledger entry."""
+
+	name: str
+	date: date
+	deposit: float = 0.0
+	withdrawal: float = 0.0
+	description: str = ""
+
+
+def match_bank_transaction(
+	lines: list[BankLine],
+	on_date: date,
+	direction: str,
+	amount: float | None = None,
+	pattern: str = "",
+	window_days: int = 7,
+) -> tuple[str | None, str]:
+	"""
+	Pick the one bank transaction that belongs to an Etsy ledger entry.
+
+	``direction`` is ``"deposit"`` (money arrived, e.g. a payout to Wise) or ``"withdrawal"`` (money
+	left, e.g. Etsy charging the card). ``amount`` must match to the cent when given; pass ``None``
+	when the bank account is in another currency than the Etsy ledger (a USD bill charged to a CAD
+	card), then the closest date wins. ``pattern`` must appear in the description (case-insensitive).
+
+	Returns ``(name, "")`` or ``(None, reason)``. Never guesses: two candidates on the same distance
+	from ``on_date`` are reported as ambiguous instead of picking one.
+	"""
+	needle = (pattern or "").strip().lower()
+	candidates: list[tuple[int, BankLine]] = []
+	for line in lines:
+		value = line.deposit if direction == "deposit" else line.withdrawal
+		if not value or value <= 0:
+			continue
+		if amount is not None and round(value, 2) != round(abs(amount), 2):
+			continue
+		if needle and needle not in (line.description or "").lower():
+			continue
+		gap = abs((line.date - on_date).days)
+		if gap > window_days:
+			continue
+		candidates.append((gap, line))
+
+	if not candidates:
+		return None, "no matching bank transaction"
+
+	candidates.sort(key=lambda c: (c[0], c[1].name))
+	if len(candidates) > 1 and candidates[0][0] == candidates[1][0]:
+		names = ", ".join(c[1].name for c in candidates if c[0] == candidates[0][0])
+		return None, f"ambiguous: {names}"
+	return candidates[0][1].name, ""
 
 
 ### Data classes

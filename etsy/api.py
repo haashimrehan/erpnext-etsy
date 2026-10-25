@@ -465,19 +465,29 @@ PAYOUT_LOOKBACK_DAYS = 35
 def synchronise_payouts():
 	"""
 	This function will be regularly executed by the Scheduler to book new Etsy payouts (deposits)
-	of the last weeks as Bank Entries for every connected shop with a payout account.
+	and card bill payments of the last weeks as Bank Entries for every connected shop with a payout
+	or bill payment account, and to reconcile them with the imported bank transactions.
 	"""
 	to_date = frappe.utils.today()
 	from_date = frappe.utils.add_days(to_date, -PAYOUT_LOOKBACK_DAYS)
 
-	shop_list = frappe.get_all("Etsy Shop", fields=["name", "status", "payout_account"])
+	shop_list = frappe.get_all(
+		"Etsy Shop", fields=["name", "status", "payout_account", "bill_payment_account"]
+	)
 
 	for shop in shop_list:
-		if shop.status != "Connected" or not shop.payout_account:
+		if shop.status != "Connected" or not (shop.payout_account or shop.bill_payment_account):
 			continue
 		try:
 			etsy_shop: EtsyShop = frappe.get_doc("Etsy Shop", shop.name)
-			etsy_shop.create_payout_journal_entries(etsy_shop.fetch_ledger_entries(from_date, to_date))
+			entries = etsy_shop.fetch_ledger_entries(from_date, to_date)
+			if shop.payout_account:
+				etsy_shop.create_payout_journal_entries(entries)
+			etsy_shop.create_bill_payment_journal_entries(entries)
+			# a bank feed often arrives days after the Etsy entry: look back a little further
+			etsy_shop.reconcile_bank_transactions(
+				frappe.utils.add_days(from_date, -etsy_shop.bank_match_window), to_date
+			)
 			frappe.db.commit()
 		except Exception:
 			frappe.db.rollback()

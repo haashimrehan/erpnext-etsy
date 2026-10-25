@@ -264,6 +264,58 @@ frappe.ui.form.on("Etsy Shop", {
 					__("Create")
 				);
 
+				frm.add_custom_button(
+					__("Reconcile Etsy Bank Transactions"),
+					async () => {
+						if (!frm.doc.payout_account && !frm.doc.bill_payment_account) {
+							frappe.msgprint({
+								message: __(
+									"Please set the 'Payout Account' and / or the 'Bill Payment Account' in the Fee & Payout Settings section first."
+								),
+								indicator: "red",
+							});
+							return;
+						}
+						frappe.prompt(
+							[
+								{
+									label: __("From Date"),
+									fieldname: "from_date",
+									fieldtype: "Date",
+									default: frappe.datetime.add_days(frappe.datetime.get_today(), -60),
+									reqd: 1,
+								},
+								{
+									label: __("To Date"),
+									fieldname: "to_date",
+									fieldtype: "Date",
+									default: frappe.datetime.get_today(),
+									reqd: 1,
+									description: __(
+										"Books card bill payments that are missing, then matches every Etsy payout and bill payment Journal Entry in the period to its bank transaction."
+									),
+								},
+							],
+							(values) => {
+								frappe.call({
+									method: "enqueue_reconcile_bank_transactions",
+									doc: frm.doc,
+									args: values,
+									callback: () => {
+										frappe.show_alert(
+											{ message: __("Etsy bank reconciliation queued."), indicator: "blue" },
+											5
+										);
+									},
+								});
+							},
+							__("Reconcile Etsy Bank Transactions"),
+							__("Reconcile")
+						);
+					},
+					__("Create")
+				);
+
 				frm.add_custom_button(__("Disconnect"), async () => {
 					frappe.warn(
 						__("Are you sure you want to proceed?"),

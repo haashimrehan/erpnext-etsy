@@ -1,6 +1,7 @@
 import base64
 import datetime
 import hashlib
+import json
 import os
 import secrets
 from urllib.parse import quote_plus, unquote_plus, urlencode, urljoin
@@ -23,6 +24,7 @@ from frappe.utils import (
 	get_link_to_form,
 	get_system_timezone,
 	getdate,
+	today,
 )
 from requests_oauthlib import OAuth2Session
 
@@ -39,13 +41,16 @@ from etsy.fees import (
 	CATEGORY_MARKETING,
 	CATEGORY_OTHER,
 	CATEGORY_SHIPPING,
+	BankLine,
 	FeeBucket,
 	LedgerRow,
 	aggregate_fees,
 	build_journal_rows,
 	format_breakdown,
+	is_bill_payment,
 	is_payout,
 	ledger_amount,
+	match_bank_transaction,
 )
 
 AUTHORIZATION_URI = "https://www.etsy.com/oauth/connect"
@@ -56,6 +61,10 @@ LISTING_STATES = ("active", "inactive", "sold_out", "draft", "expired")
 
 # Etsy rejects a ledger request whose window is longer than 31 days (2678400 seconds).
 LEDGER_MAX_WINDOW_DAYS = 30
+
+# A card charged in another currency than the Etsy ledger is matched by date; the charge must be
+# within this fraction of the bill converted at the system exchange rate (card FX spread ~2.5%).
+BILL_RATE_TOLERANCE = 0.08
 
 # Guards a mistyped backfill range from queueing years of API calls.
 MAX_BACKFILL_MONTHS = 36
@@ -86,6 +95,14 @@ def months_between(from_date, to_date) -> list[tuple[int, int]]:
 	return months
 
 
+def month_is_finished(year: int, month: int, on_date=None) -> bool:
+	"""
+	True once the whole month lies in the past. A fee Journal Entry is one per month and never
+	revisited, so booking a month that is still running would leave its remaining fees out for good.
+	"""
+	return getdate(get_last_day(f"{cint(year):04d}-{cint(month):02d}-01")) < getdate(on_date or today())
+
+
 def short_title(title: str) -> str:  # TODO: move to utils
 	return (
 		title.replace("&quot;", '"')
@@ -109,6 +126,27 @@ class EtsyShop(Document):
 			base_url = f"{splt[0]}://localhost:{splt[-1]}"
 		callback_path = f"/api/method/etsy.etsy.doctype.etsy_shop.etsy_shop.callback/{quote_plus(self.name)}"
 		self.redirect_uri = urljoin(base_url, callback_path)
+
+		if self.fees_expense_account and not self.fee_tax_account:
+			frappe.msgprint(
+				_(
+					"'Tax on Seller Fees Account' is empty, so the sales tax Etsy charges on its fees is booked "
+					"as an expense. If you can claim it back (e.g. GST/HST input tax credit), set it to your "
+					"tax account."
+				),
+				indicator="orange",
+				alert=True,
+			)
+		for field in ("payout_account", "bill_payment_account"):
+			account = self.get(field)
+			if account and self.auto_reconcile and not self.get_bank_account_for(account):
+				frappe.msgprint(
+					_(
+						"No company Bank Account is linked to {0}, so its Etsy transactions cannot be reconciled."
+					).format(account),
+					indicator="orange",
+					alert=True,
+				)
 
 	### public
 	def get_auth_header(self) -> dict:
@@ -837,10 +875,16 @@ class EtsyShop(Document):
 		ledger_entries: list[LedgerEntry] | None = None,
 	) -> dict:
 		"""
-		Book the Etsy ledger of one month: the fee Journal Entry and one Journal Entry per payout.
-		Returns ``{"fee_journal_entry": name | None, "payout_journal_entries": [names]}``.
+		Book the Etsy ledger of one month: the fee Journal Entry, one Journal Entry per payout and one
+		per card bill payment, then reconcile them against the bank transactions.
 		"""
-		result = {"fee_journal_entry": None, "payout_journal_entries": []}
+		result = {
+			"fee_journal_entry": None,
+			"payout_journal_entries": [],
+			"bill_payment_journal_entries": [],
+			"reconciled": [],
+			"unmatched": [],
+		}
 		if not (fees or payouts):
 			return result
 
@@ -852,6 +896,13 @@ class EtsyShop(Document):
 			result["fee_journal_entry"] = self.create_fee_journal_entry(year, month, ledger_entries=entries)
 		if payouts:
 			result["payout_journal_entries"] = self.create_payout_journal_entries(entries)
+			bills = self.create_bill_payment_journal_entries(entries)
+			result["bill_payment_journal_entries"] = bills["created"]
+			result["unmatched"].extend(bills["unmatched"])
+			first_day = get_first_day(f"{self.fee_period(year, month)}-01")
+			reconciled = self.reconcile_bank_transactions(first_day, get_last_day(first_day))
+			result["reconciled"] = reconciled["reconciled"]
+			result["unmatched"].extend(reconciled["unmatched"])
 		return result
 
 	def get_ledger_currency(self, entries: list[LedgerEntry]) -> str:
@@ -874,12 +925,14 @@ class EtsyShop(Document):
 		marketing / ads, shipping labels, taxes on fees, ...) against the shop's bank account.
 
 		Idempotent: if a Journal Entry for this shop and month already exists its name is returned.
-		Returns ``None`` when the month contains no fee entries.
+		Returns ``None`` when the month contains no fee entries or has not finished yet.
 		"""
 		self.validate_fee_settings()
 
 		if existing := self.get_fee_journal_entry(self.name, year, month):
 			return existing
+		if not month_is_finished(year, month):
+			return None
 
 		entries = (
 			ledger_entries if ledger_entries is not None else self.fetch_ledger_month(year, month, etsy_api)
@@ -973,18 +1026,263 @@ class EtsyShop(Document):
 
 		return journal_entry.name
 
+	### Card bill payments & bank reconciliation ###
+
+	@staticmethod
+	def get_bank_account_for(account: str | None) -> str | None:
+		"""The company Bank Account (the record bank transactions are imported into) of a GL account."""
+		if not account:
+			return None
+		return frappe.db.get_value("Bank Account", {"account": account, "is_company_account": 1}, "name")
+
+	def get_open_bank_lines(self, bank_account: str, around, window_days: int) -> list[BankLine]:
+		"""Submitted, completely unreconciled bank transactions within ``window_days`` of ``around``."""
+		around = getdate(around)
+		rows = frappe.get_all(
+			"Bank Transaction",
+			filters={
+				"bank_account": bank_account,
+				"docstatus": 1,
+				"status": ("not in", ("Reconciled", "Cancelled")),
+				"date": ("between", (add_days(around, -window_days), add_days(around, window_days))),
+			},
+			fields=["name", "date", "deposit", "withdrawal", "description", "unallocated_amount"],
+		)
+		return [
+			BankLine(r.name, getdate(r.date), flt(r.deposit), flt(r.withdrawal), r.description or "")
+			for r in rows
+			# skip bank transactions that are already partly matched to something else
+			if flt(r.unallocated_amount, 2) == flt(flt(r.deposit) + flt(r.withdrawal), 2)
+		]
+
+	@property
+	def bank_match_window(self) -> int:
+		return cint(self.bank_match_days) or 7
+
+	@staticmethod
+	def is_reconciled(journal_entry: str) -> bool:
+		return bool(
+			frappe.db.exists(
+				"Bank Transaction Payments",
+				{"payment_document": "Journal Entry", "payment_entry": journal_entry, "docstatus": 1},
+			)
+		)
+
+	@staticmethod
+	def reconcile_bank_transaction(bank_transaction: str, journal_entry: str, amount: float):
+		from erpnext.accounts.doctype.bank_reconciliation_tool.bank_reconciliation_tool import (
+			reconcile_vouchers,
+		)
+
+		reconcile_vouchers(
+			bank_transaction,
+			json.dumps(
+				[
+					{
+						"payment_doctype": "Journal Entry",
+						"payment_name": journal_entry,
+						"amount": flt(amount, 2),
+					}
+				]
+			),
+		)
+
+	def create_bill_payment_journal_entries(self, ledger_entries: list[LedgerEntry]) -> dict:
+		"""
+		Book every card charge Etsy made to settle a negative balance (``billing_payment``) as a Bank
+		Entry from the card to the Etsy clearing account, and reconcile it with the card's bank
+		transaction.
+
+		The Etsy ledger is in USD while the card may be in CAD: the card transaction is found by date
+		and description, and its exact amount becomes the card row, so the Journal Entry reconciles to
+		the cent and the clearing account still moves by the USD amount Etsy recorded.
+
+		Idempotent per ledger entry. Returns ``{"created": [names], "unmatched": [messages]}``.
+		"""
+		result = {"created": [], "unmatched": []}
+		if not (self.bill_payment_account and self.bank_account):
+			return result
+
+		bank_account = self.get_bank_account_for(self.bill_payment_account)
+		card_currency = frappe.get_cached_value("Account", self.bill_payment_account, "account_currency")
+
+		for entry in ledger_entries:
+			if not is_bill_payment(entry) or self.get_payout_journal_entry(entry.entry_id):
+				continue
+
+			amount = abs(ledger_amount(entry))
+			ledger_currency = (entry.currency or erpnext.get_company_currency(self.company)).upper()
+			on_date = getdate(entry.created_timestamp)
+			label = f"{on_date} {amount:.2f} {ledger_currency} (Etsy bill payment {entry.entry_id})"
+			if not bank_account:
+				result["unmatched"].append(
+					_("{0}: no Bank Account for {1}").format(label, self.bill_payment_account)
+				)
+				continue
+
+			bank_transaction, reason = match_bank_transaction(
+				self.get_open_bank_lines(bank_account, on_date, self.bank_match_window),
+				on_date,
+				"withdrawal",
+				amount=amount if card_currency == ledger_currency else None,
+				pattern=self.bank_match_description or "Etsy",
+				window_days=self.bank_match_window,
+			)
+			if not bank_transaction:
+				result["unmatched"].append(f"{label}: {reason}")
+				continue
+
+			bt = frappe.db.get_value(
+				"Bank Transaction", bank_transaction, ["date", "withdrawal"], as_dict=True
+			)
+			if card_currency != ledger_currency:
+				# matched by date only: make sure the charge is this bill converted, not another purchase
+				market_rate = flt(get_exchange_rate(ledger_currency, card_currency, on_date))
+				if market_rate and abs(flt(bt.withdrawal) / amount / market_rate - 1) > BILL_RATE_TOLERANCE:
+					result["unmatched"].append(
+						_("{0}: {1} charged {2} {3}, too far from the exchange rate").format(
+							label, bank_transaction, flt(bt.withdrawal, 2), card_currency
+						)
+					)
+					continue
+
+			journal_entry = self.create_bill_payment_journal_entry(
+				entry, flt(bt.withdrawal, 2), getdate(bt.date)
+			)
+			result["created"].append(journal_entry)
+			if self.auto_reconcile and frappe.db.get_value("Journal Entry", journal_entry, "docstatus") == 1:
+				self.reconcile_bank_transaction(bank_transaction, journal_entry, bt.withdrawal)
+
+		return result
+
+	def create_bill_payment_journal_entry(
+		self, entry: LedgerEntry, charged_amount: float, posting_date
+	) -> str:
+		amount = abs(ledger_amount(entry))  # money into the Etsy balance
+		ledger_currency = (entry.currency or erpnext.get_company_currency(self.company)).upper()
+		company_currency = erpnext.get_company_currency(self.company)
+		card_currency = frappe.get_cached_value("Account", self.bill_payment_account, "account_currency")
+
+		journal_entry: Document = frappe.new_doc("Journal Entry")
+		journal_entry.voucher_type = "Bank Entry"
+		journal_entry.company = self.company
+		journal_entry.posting_date = posting_date
+		journal_entry.cheque_no = f"Etsy bill payment {entry.entry_id}"
+		journal_entry.cheque_date = posting_date
+		journal_entry.title = f"Etsy bill payment {posting_date} - {self.name}"
+		journal_entry.etsy_shop = self.name
+		journal_entry.etsy_ledger_entry_id = cstr(entry.entry_id)
+		journal_entry.user_remark = (
+			f"Etsy charged {charged_amount:.2f} {card_currency} to settle a negative balance of "
+			f"{amount:.2f} {ledger_currency} ({self.name}), ledger entry {entry.entry_id}"
+		)
+
+		rows = [
+			LedgerRow(self.bank_account, amount, f"Etsy bill payment {entry.entry_id}"),
+			LedgerRow(self.bill_payment_account, -amount, f"Etsy bill payment {entry.entry_id}"),
+		]
+		# The card was charged in its own currency: use the rate implied by the actual charge so the
+		# card row equals the bank transaction to the cent.
+		exchange_rate = None
+		if ledger_currency != company_currency and card_currency == company_currency and amount:
+			exchange_rate = charged_amount / amount
+		self.append_ledger_rows(
+			journal_entry, rows, ledger_currency, posting_date, exchange_rate=exchange_rate
+		)
+
+		journal_entry.flags.ignore_permissions = True
+		journal_entry.insert(ignore_permissions=True)
+		if self.payout_journal_entry_submit:
+			journal_entry.submit()
+
+		return journal_entry.name
+
+	def reconcile_bank_transactions(self, from_date, to_date) -> dict:
+		"""
+		Reconcile this shop's submitted payout and bill payment Journal Entries in the period with the
+		matching bank transactions (payouts: exact amount on the payout bank account; bill payments:
+		the card). Safe to run repeatedly; entries that are already reconciled are skipped.
+
+		Returns ``{"reconciled": [names], "unmatched": [messages]}``.
+		"""
+		result = {"reconciled": [], "unmatched": []}
+		if not self.auto_reconcile:
+			return result
+
+		journal_entries = frappe.get_all(
+			"Journal Entry",
+			filters={
+				"etsy_shop": self.name,
+				"docstatus": 1,
+				"etsy_ledger_entry_id": ("is", "set"),
+				"posting_date": ("between", (getdate(from_date), getdate(to_date))),
+			},
+			pluck="name",
+		)
+		bank_side = [a for a in (self.payout_account, self.bill_payment_account) if a]
+
+		for name in journal_entries:
+			if self.is_reconciled(name):
+				continue
+			journal_entry = frappe.get_doc("Journal Entry", name)
+			row = next((r for r in journal_entry.accounts if r.account in bank_side), None)
+			bank_account = self.get_bank_account_for(row.account) if row else None
+			if not bank_account:
+				continue
+
+			deposit = flt(row.debit_in_account_currency, 2)
+			amount = deposit or flt(row.credit_in_account_currency, 2)
+			bank_transaction, reason = match_bank_transaction(
+				self.get_open_bank_lines(bank_account, journal_entry.posting_date, self.bank_match_window),
+				getdate(journal_entry.posting_date),
+				"deposit" if deposit else "withdrawal",
+				amount=amount,
+				pattern=self.bank_match_description or "Etsy",
+				window_days=self.bank_match_window,
+			)
+			if not bank_transaction:
+				result["unmatched"].append(f"{name} ({amount:.2f} on {journal_entry.posting_date}): {reason}")
+				continue
+
+			self.reconcile_bank_transaction(bank_transaction, name, amount)
+			result["reconciled"].append(name)
+
+		return result
+
+	@frappe.whitelist()
+	def enqueue_reconcile_bank_transactions(self, from_date: str, to_date: str):
+		"""Book missing card bill payments and reconcile all Etsy bank transactions in the period."""
+		frappe.enqueue(
+			"etsy.etsy.doctype.etsy_shop.etsy_shop.run_reconcile_bank_transactions",
+			queue="long",
+			timeout=1800,
+			user=frappe.session.user,
+			etsy_shop=self.name,
+			from_date=from_date,
+			to_date=to_date,
+		)
+
 	def append_ledger_rows(
-		self, journal_entry: Document, rows: list[LedgerRow], ledger_currency: str, posting_date
+		self,
+		journal_entry: Document,
+		rows: list[LedgerRow],
+		ledger_currency: str,
+		posting_date,
+		exchange_rate: float | None = None,
 	):
 		"""
 		Append balanced ledger currency rows to a Journal Entry, converting to the currency of each
-		account (ledger or company currency) and absorbing rounding differences.
+		account (ledger or company currency) and absorbing rounding differences. ``exchange_rate``
+		overrides the system rate (e.g. the rate implied by an actual card charge).
 		"""
 		company_currency = erpnext.get_company_currency(self.company)
 		cost_center = self.fee_cost_center or erpnext.get_default_cost_center(self.company)
 
-		exchange_rate = 1.0
-		if ledger_currency != company_currency:
+		if exchange_rate:
+			exchange_rate = flt(exchange_rate, 9)
+		elif ledger_currency == company_currency:
+			exchange_rate = 1.0
+		else:
 			exchange_rate = flt(get_exchange_rate(ledger_currency, company_currency, posting_date))
 			if not exchange_rate:
 				frappe.throw(
@@ -1063,6 +1361,8 @@ def run_book_ledger(user, etsy_shop, from_date, to_date=None, fees=1, payouts=1)
 	skipped: list[tuple[str, str]] = []
 	payout_entries: list[str] = []
 	failed: list[str] = []
+	unfinished: list[str] = []
+	extra = {"bill_payment_entries": [], "reconciled": [], "unmatched": []}
 
 	for year, month in months:
 		period = shop.fee_period(year, month)
@@ -1084,17 +1384,64 @@ def run_book_ledger(user, etsy_shop, from_date, to_date=None, fees=1, payouts=1)
 		if fees and not existing:
 			if result["fee_journal_entry"]:
 				created_fees.append((period, result["fee_journal_entry"]))
+			elif not month_is_finished(year, month):
+				unfinished.append(period)
 			else:
 				empty_months.append(period)
 		payout_entries.extend(result["payout_journal_entries"])
+		extra["bill_payment_entries"].extend(result["bill_payment_journal_entries"])
+		extra["reconciled"].extend(result["reconciled"])
+		extra["unmatched"].extend(result["unmatched"])
 
 	frappe.publish_realtime(
 		"msgprint",
 		{
 			"message": book_ledger_summary(
-				etsy_shop, months, created_fees, empty_months, skipped, payout_entries, failed, payouts
+				etsy_shop,
+				months,
+				created_fees,
+				empty_months,
+				skipped,
+				payout_entries,
+				failed,
+				payouts,
+				unfinished=unfinished,
+				**extra,
 			),
-			"indicator": "red" if failed else ("orange" if skipped else "green"),
+			"indicator": "red" if failed else ("orange" if skipped or extra["unmatched"] else "green"),
+			"alert": True,
+		},
+		user=user,
+	)
+
+
+def run_reconcile_bank_transactions(user, etsy_shop, from_date, to_date):
+	"""Book missing card bill payments, then reconcile every Etsy Journal Entry in the period."""
+	shop: EtsyShop = frappe.get_doc("Etsy Shop", etsy_shop)
+	bills = {"created": [], "unmatched": []}
+	if shop.bill_payment_account:
+		bills = shop.create_bill_payment_journal_entries(shop.fetch_ledger_entries(from_date, to_date))
+	result = shop.reconcile_bank_transactions(from_date, to_date)
+	frappe.db.commit()
+
+	months = months_between(from_date, to_date)
+	frappe.publish_realtime(
+		"msgprint",
+		{
+			"message": book_ledger_summary(
+				etsy_shop,
+				months,
+				[],
+				[],
+				[],
+				[],
+				[],
+				payouts=0,
+				bill_payment_entries=bills["created"],
+				reconciled=result["reconciled"],
+				unmatched=bills["unmatched"] + result["unmatched"],
+			),
+			"indicator": "orange" if bills["unmatched"] or result["unmatched"] else "green",
 			"alert": True,
 		},
 		user=user,
@@ -1102,7 +1449,18 @@ def run_book_ledger(user, etsy_shop, from_date, to_date=None, fees=1, payouts=1)
 
 
 def book_ledger_summary(
-	etsy_shop, months, created_fees, empty_months, skipped, payout_entries, failed, payouts=1
+	etsy_shop,
+	months,
+	created_fees,
+	empty_months,
+	skipped,
+	payout_entries,
+	failed,
+	payouts=1,
+	unfinished=(),
+	bill_payment_entries=(),
+	reconciled=(),
+	unmatched=(),
 ) -> str:
 	"""Readable result of a (possibly multi month) ledger booking."""
 
@@ -1123,6 +1481,8 @@ def book_ledger_summary(
 		)
 	if empty_months:
 		lines.append(_("No Etsy fees found for: {0}").format(", ".join(empty_months)))
+	if unfinished:
+		lines.append(_("Month not finished, fees not booked yet: {0}").format(", ".join(unfinished)))
 	if skipped:
 		lines.append(
 			_("Already booked, left untouched: {0}").format(
@@ -1138,6 +1498,20 @@ def book_ledger_summary(
 		)
 	elif payouts and not failed:
 		lines.append(_("No new Etsy payouts found."))
+	if bill_payment_entries:
+		lines.append(
+			_("{0} card bill payment Journal Entries created: {1}").format(
+				len(bill_payment_entries), entry_links([(None, n) for n in bill_payment_entries])
+			)
+		)
+	if reconciled:
+		lines.append(
+			_("{0} bank transactions reconciled: {1}").format(
+				len(reconciled), entry_links([(None, n) for n in reconciled])
+			)
+		)
+	if unmatched:
+		lines.append(_("Not reconciled: {0}").format("; ".join(unmatched[:12])))
 	if failed:
 		lines.append(_("Failed (see Error Log): {0}").format(", ".join(failed)))
 

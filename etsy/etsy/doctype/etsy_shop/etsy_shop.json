@@ -54,6 +54,10 @@
   "payout_account",
   "column_break_payout",
   "payout_journal_entry_submit",
+  "bill_payment_account",
+  "auto_reconcile",
+  "bank_match_description",
+  "bank_match_days",
   "customer_settings_section",
   "customer_naming_series",
   "customer_group",
@@ -425,11 +429,39 @@
    "fieldname": "payout_journal_entry_submit",
    "fieldtype": "Check",
    "label": "Submit Payout Journal Entries automatically"
+  },
+  {
+   "fieldname": "bill_payment_account",
+   "fieldtype": "Link",
+   "label": "Bill Payment Account",
+   "options": "Account",
+   "description": "Card (or bank) account Etsy charges when the shop balance is negative (\"Etsy.com*IE\" / \"Etsy Monthly Bill\"). Each charge is booked as a Bank Entry from this account to the Bank Account (Etsy clearing), using the exact amount charged. Leave empty to skip."
+  },
+  {
+   "default": "1",
+   "fieldname": "auto_reconcile",
+   "fieldtype": "Check",
+   "label": "Reconcile Bank Transactions automatically",
+   "description": "Match payout and bill payment Journal Entries to the imported Bank Transactions of the Payout / Bill Payment accounts and reconcile them. Ambiguous matches are left for you."
+  },
+  {
+   "default": "Etsy",
+   "fieldname": "bank_match_description",
+   "fieldtype": "Data",
+   "label": "Bank Description Contains",
+   "description": "Text a bank transaction description must contain to be matched (case-insensitive)."
+  },
+  {
+   "default": "7",
+   "fieldname": "bank_match_days",
+   "fieldtype": "Int",
+   "label": "Bank Match Window (days)",
+   "description": "How many days a bank transaction may lie before or after the Etsy entry."
   }
  ],
  "grid_page_length": 50,
  "links": [],
- "modified": "2026-09-17 12:00:00.000000",
+ "modified": "2026-10-25 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Etsy",
  "name": "Etsy Shop",

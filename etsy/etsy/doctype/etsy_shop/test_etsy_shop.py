@@ -12,6 +12,7 @@ except ImportError:
 
 from etsy.etsy.doctype.etsy_shop.etsy_shop import (
 	book_ledger_summary,
+	month_is_finished,
 	months_between,
 	short_title,
 )
@@ -20,13 +21,16 @@ from etsy.fees import (
 	CATEGORY_MARKETING,
 	CATEGORY_OTHER,
 	CATEGORY_SHIPPING,
+	BankLine,
 	LedgerRow,
 	UnbalancedRows,
 	aggregate_fees,
 	build_journal_rows,
 	classify_ledger_entry,
 	format_breakdown,
+	is_bill_payment,
 	is_payout,
+	match_bank_transaction,
 )
 
 _entry_ids = count(900_000_001)
@@ -715,3 +719,109 @@ class TestShortTitle(FrappeTestCase):
 
 	def test_strips_whitespace(self):
 		self.assertEqual(short_title("  Hello World  , more stuff"), "Hello World")
+
+
+class TestBillPayments(FrappeTestCase):
+	"""Etsy charging the card on file to settle a negative balance."""
+
+	def test_live_token(self):
+		self.assertTrue(is_bill_payment(real_ledger(2008, "billing_payment", "billing_payment")))
+
+	def test_older_names(self):
+		self.assertTrue(is_bill_payment(ledger(2865, "Recoupment", ledger_type="recoupment")))
+		self.assertTrue(is_bill_payment(ledger(2865, "Bill payment", ledger_type=None)))
+
+	def test_other_entries_are_not_bill_payments(self):
+		self.assertFalse(is_bill_payment(real_ledger(48947, "PAYMENT_GROSS", "shop_payment")))
+		self.assertFalse(is_bill_payment(real_ledger(-33124, "DISBURSE2", "disbursement")))
+		self.assertFalse(is_bill_payment(real_ledger(-18260, "prolist", "prolist")))
+		self.assertFalse(is_bill_payment(ledger(0, "billing_payment", ledger_type="billing_payment")))
+
+	def test_still_not_a_fee(self):
+		self.assertIsNone(classify_ledger_entry(real_ledger(2008, "billing_payment", "billing_payment")))
+
+	def test_money_out_is_not_a_bill_payment(self):
+		self.assertFalse(is_bill_payment(ledger(-500, "Recoupment", ledger_type="recoupment")))
+
+	def test_card_rate_makes_the_card_row_exact(self):
+		# US$26.02 billed, the CAD card was charged CA$36.35
+		rows = build_journal_rows(
+			[LedgerRow("Etsy Clearing USD - X", 26.02), LedgerRow("Card - X", -26.02)],
+			"USD",
+			"CAD",
+			36.35 / 26.02,
+			lambda a: "USD" if "USD" in a else "CAD",
+		)
+		clearing, card = rows
+		self.assertEqual(clearing["debit_in_account_currency"], 26.02)
+		self.assertEqual(card["credit_in_account_currency"], 36.35)
+		self.assertAlmostEqual(sum(r["company_amount"] for r in rows), 0)
+
+
+class TestMonthIsFinished(FrappeTestCase):
+	def test_running_month(self):
+		self.assertFalse(month_is_finished(2026, 10, on_date="2026-10-25"))
+
+	def test_last_day_is_still_running(self):
+		self.assertFalse(month_is_finished(2026, 10, on_date="2026-10-31"))
+
+	def test_next_day(self):
+		self.assertTrue(month_is_finished(2026, 10, on_date="2026-11-01"))
+
+	def test_future_month(self):
+		self.assertFalse(month_is_finished(2026, 12, on_date="2026-10-25"))
+
+
+class TestMatchBankTransaction(FrappeTestCase):
+	"""Picking the bank transaction for a payout (Wise, USD) or a bill payment (card, CAD)."""
+
+	D = datetime.date
+
+	def test_usd_payout_by_exact_amount(self):
+		lines = [
+			BankLine("BT-1", self.D(2026, 8, 5), deposit=147.37, description="ETSY CANADA LIMI"),
+			BankLine("BT-2", self.D(2026, 8, 5), deposit=147.38, description="ETSY CANADA LIMI"),
+		]
+		self.assertEqual(
+			match_bank_transaction(lines, self.D(2026, 8, 4), "deposit", 147.37, "etsy"), ("BT-1", "")
+		)
+
+	def test_direction_matters(self):
+		lines = [BankLine("BT-1", self.D(2026, 8, 5), withdrawal=147.37, description="Etsy")]
+		name, reason = match_bank_transaction(lines, self.D(2026, 8, 4), "deposit", 147.37, "etsy")
+		self.assertIsNone(name)
+		self.assertIn("no matching", reason)
+
+	def test_cad_card_by_date_and_description(self):
+		lines = [
+			BankLine("BT-AMZ", self.D(2026, 9, 2), withdrawal=28.65, description="AMAZON.CA"),
+			BankLine("BT-ETSY", self.D(2026, 9, 2), withdrawal=28.65, description="ETSY.COM*IE"),
+			BankLine("BT-OLD", self.D(2026, 8, 20), withdrawal=12.00, description="ETSY.COM*IE"),
+		]
+		self.assertEqual(
+			match_bank_transaction(lines, self.D(2026, 9, 1), "withdrawal", None, "Etsy"), ("BT-ETSY", "")
+		)
+
+	def test_outside_the_window(self):
+		lines = [BankLine("BT-1", self.D(2026, 9, 12), withdrawal=28.65, description="Etsy")]
+		self.assertIsNone(match_bank_transaction(lines, self.D(2026, 9, 2), "withdrawal", None, "Etsy")[0])
+		self.assertEqual(
+			match_bank_transaction(lines, self.D(2026, 9, 2), "withdrawal", None, "Etsy", 10)[0], "BT-1"
+		)
+
+	def test_closest_date_wins(self):
+		lines = [
+			BankLine("BT-1", self.D(2026, 9, 6), withdrawal=10, description="Etsy"),
+			BankLine("BT-2", self.D(2026, 9, 3), withdrawal=11, description="Etsy"),
+		]
+		self.assertEqual(match_bank_transaction(lines, self.D(2026, 9, 2), "withdrawal")[0], "BT-2")
+
+	def test_ambiguous_is_left_alone(self):
+		lines = [
+			BankLine("BT-1", self.D(2026, 8, 5), deposit=16.44, description="ETSY"),
+			BankLine("BT-2", self.D(2026, 8, 3), deposit=16.44, description="ETSY"),
+		]
+		name, reason = match_bank_transaction(lines, self.D(2026, 8, 4), "deposit", 16.44, "etsy")
+		self.assertIsNone(name)
+		self.assertIn("BT-1", reason)
+		self.assertIn("BT-2", reason)

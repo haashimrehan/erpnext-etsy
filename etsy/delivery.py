@@ -31,13 +31,6 @@ def tracking_label(info: ShipInfo) -> str:
 	return " ".join(p for p in (info.carrier, info.tracking) if p)[:140]
 
 
-def dispatch_warehouse(country_iso: str | None, default: str, us_warehouse: str | None, us_has_stock: bool) -> str:
-	"""US buyers are served from the US dispatch warehouse whenever it holds the stock; everything else ships from home."""
-	if us_warehouse and (country_iso or "").upper() == "US" and us_has_stock:
-		return us_warehouse
-	return default
-
-
 def stock_shortfall(needed: dict[tuple[str, str], float], on_hand: dict[tuple[str, str], float]) -> dict:
 	"""Quantity per (item, warehouse) that has to be received before the delivery can go out."""
 	return {key: qty - max(on_hand.get(key, 0.0), 0.0) for key, qty in needed.items() if qty > on_hand.get(key, 0.0)}

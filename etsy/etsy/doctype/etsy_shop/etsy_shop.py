@@ -42,7 +42,7 @@ from etsy.api import (
 	fetch_all,
 )
 from etsy.datastruct import LedgerEntry, ListingType
-from etsy.delivery import dispatch_warehouse, ship_info, stock_shortfall, tracking_label
+from etsy.delivery import ship_info, stock_shortfall, tracking_label
 from etsy.fees import (
 	CATEGORY_FEES,
 	CATEGORY_MARKETING,
@@ -837,7 +837,6 @@ class EtsyShop(Document):
 		Products are made to order and their material is expensed when bought, so they are never received
 		into stock. Any shortfall in the dispatch warehouse is first brought in by a zero-value Material
 		Receipt; the Delivery Note then costs nothing either and only records the shipment.
-		US buyers are served from the US dispatch warehouse when it holds the stock.
 		"""
 		info = ship_info(receipt)
 		shipped = info.shipped_at or now_datetime()
@@ -858,15 +857,7 @@ class EtsyShop(Document):
 		for item in dn.items:
 			if not frappe.db.get_value("Item", item.item_code, "is_stock_item"):
 				continue
-			home = item.warehouse or self.warehouse
-			us_stock = (
-				flt(get_stock_balance(item.item_code, self.us_dispatch_warehouse, posting_date, posting_time))
-				if self.us_dispatch_warehouse
-				else 0.0
-			)
-			item.warehouse = dispatch_warehouse(
-				receipt.country_iso, home, self.us_dispatch_warehouse, us_stock >= flt(item.stock_qty)
-			)
+			item.warehouse = item.warehouse or self.warehouse
 			item.allow_zero_valuation_rate = 1
 			key = (item.item_code, item.warehouse)
 			needed[key] = needed.get(key, 0.0) + flt(item.stock_qty)

@@ -16,7 +16,7 @@ from etsy.etsy.doctype.etsy_shop.etsy_shop import (
 	months_between,
 	short_title,
 )
-from etsy.delivery import dispatch_warehouse, ship_info, stock_shortfall, tracking_label
+from etsy.delivery import ship_info, stock_shortfall, tracking_label
 from etsy.fees import (
 	CATEGORY_FEES,
 	CATEGORY_MARKETING,
@@ -859,13 +859,6 @@ class TestDeliveryDecisions(FrappeTestCase):
 
 	def test_no_ship_time_at_all(self):
 		self.assertIsNone(ship_info(self.receipt()).shipped_at)
-
-	def test_us_buyer_uses_us_warehouse_only_with_stock(self):
-		self.assertEqual(dispatch_warehouse("US", "Main", "Lock On Gear", True), "Lock On Gear")
-		self.assertEqual(dispatch_warehouse("us", "Main", "Lock On Gear", True), "Lock On Gear")
-		self.assertEqual(dispatch_warehouse("US", "Main", "Lock On Gear", False), "Main")
-		self.assertEqual(dispatch_warehouse("CA", "Main", "Lock On Gear", True), "Main")
-		self.assertEqual(dispatch_warehouse("US", "Main", None, True), "Main")
 
 	def test_shortfall_only_for_missing_stock(self):
 		needed = {("STAND", "Main"): 2.0, ("PLAQUE", "Main"): 1.0, ("COVER", "US"): 1.0}

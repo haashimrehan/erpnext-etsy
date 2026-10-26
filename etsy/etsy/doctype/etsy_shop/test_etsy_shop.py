@@ -17,6 +17,7 @@ from etsy.etsy.doctype.etsy_shop.etsy_shop import (
 	short_title,
 )
 from etsy.delivery import ship_info, stock_shortfall, tracking_label
+from etsy.price_list import PriceListOption, pick_price_list
 from etsy.fees import (
 	CATEGORY_FEES,
 	CATEGORY_MARKETING,
@@ -867,3 +868,35 @@ class TestDeliveryDecisions(FrappeTestCase):
 
 	def test_negative_stock_is_topped_up_from_zero(self):
 		self.assertEqual(stock_shortfall({("X", "Main"): 1.0}, {("X", "Main"): -2.0}), {("X", "Main"): 1.0})
+
+
+class TestPriceListChoice(FrappeTestCase):
+	LISTS = (
+		PriceListOption("Standard Selling", "CAD", ["Canada"]),
+		PriceListOption("Standard USD Selling", "USD", ["United States"]),
+	)
+
+	def test_keeps_current_list_where_it_applies(self):
+		self.assertEqual(
+			pick_price_list(list(self.LISTS), "Canada", "USD", "Standard Selling"), "Standard Selling"
+		)
+
+	def test_switches_to_the_list_made_for_the_country(self):
+		self.assertEqual(
+			pick_price_list(list(self.LISTS), "United States", "CAD", "Standard Selling"),
+			"Standard USD Selling",
+		)
+
+	def test_falls_back_to_an_unrestricted_list_in_the_order_currency(self):
+		lists = [*self.LISTS, PriceListOption("World CAD", "CAD"), PriceListOption("World USD", "USD")]
+		self.assertEqual(pick_price_list(lists, "Germany", "USD", "Standard Selling"), "World USD")
+
+	def test_without_any_fit_the_current_list_stays(self):
+		self.assertEqual(
+			pick_price_list(list(self.LISTS), "Germany", "USD", "Standard Selling"), "Standard Selling"
+		)
+
+	def test_unknown_country_keeps_current(self):
+		self.assertEqual(
+			pick_price_list(list(self.LISTS), None, "USD", "Standard Selling"), "Standard Selling"
+		)

@@ -265,6 +265,28 @@ frappe.ui.form.on("Etsy Shop", {
 				);
 
 				frm.add_custom_button(
+					__("Delivery Notes for Shipped Orders"),
+					() => {
+						frappe.call({
+							method: "enqueue_deliver_shipped_orders",
+							doc: frm.doc,
+							callback: () => {
+								frappe.show_alert(
+									{
+										message: __(
+											"Checking imported Etsy orders for shipments. Delivery Notes are created in the background."
+										),
+										indicator: "blue",
+									},
+									5
+								);
+							},
+						});
+					},
+					__("Create")
+				);
+
+				frm.add_custom_button(
 					__("Reconcile Etsy Bank Transactions"),
 					async () => {
 						if (!frm.doc.payout_account && !frm.doc.bill_payment_account) {

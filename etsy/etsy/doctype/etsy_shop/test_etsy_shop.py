@@ -16,6 +16,7 @@ from etsy.etsy.doctype.etsy_shop.etsy_shop import (
 	months_between,
 	short_title,
 )
+from etsy.delivery import ship_info, stock_shortfall, tracking_label
 from etsy.fees import (
 	CATEGORY_FEES,
 	CATEGORY_MARKETING,
@@ -825,3 +826,44 @@ class TestMatchBankTransaction(FrappeTestCase):
 		self.assertIsNone(name)
 		self.assertIn("BT-1", reason)
 		self.assertIn("BT-2", reason)
+
+
+class TestDeliveryDecisions(FrappeTestCase):
+	T = datetime.datetime
+
+	def receipt(self, shipments=(), shipped=()):
+		return SimpleNamespace(
+			shipments=[
+				SimpleNamespace(shipment_notification_timestamp=t, carrier_name=c, tracking_code=n)
+				for t, c, n in shipments
+			],
+			transactions=[SimpleNamespace(shipped_timestamp=t) for t in shipped],
+		)
+
+	def test_latest_shipment_notice_wins(self):
+		info = ship_info(
+			self.receipt(
+				shipments=[
+					(self.T(2026, 10, 25, 9), "canada-post", "111"),
+					(self.T(2026, 10, 26, 14), "usps", "9400111"),
+				]
+			)
+		)
+		self.assertEqual(info.shipped_at, self.T(2026, 10, 26, 14))
+		self.assertEqual(tracking_label(info), "usps 9400111")
+
+	def test_falls_back_to_transaction_ship_time(self):
+		info = ship_info(self.receipt(shipped=[self.T(2026, 4, 16), None, self.T(2026, 4, 17)]))
+		self.assertEqual(info.shipped_at, self.T(2026, 4, 17))
+		self.assertEqual(tracking_label(info), "")
+
+	def test_no_ship_time_at_all(self):
+		self.assertIsNone(ship_info(self.receipt()).shipped_at)
+
+	def test_shortfall_only_for_missing_stock(self):
+		needed = {("STAND", "Main"): 2.0, ("PLAQUE", "Main"): 1.0, ("COVER", "US"): 1.0}
+		on_hand = {("STAND", "Main"): 0.0, ("PLAQUE", "Main"): 3.0, ("COVER", "US"): 0.5}
+		self.assertEqual(stock_shortfall(needed, on_hand), {("STAND", "Main"): 2.0, ("COVER", "US"): 0.5})
+
+	def test_negative_stock_is_topped_up_from_zero(self):
+		self.assertEqual(stock_shortfall({("X", "Main"): 1.0}, {("X", "Main"): -2.0}), {("X", "Main"): 1.0})

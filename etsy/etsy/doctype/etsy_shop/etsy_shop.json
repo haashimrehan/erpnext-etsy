@@ -65,7 +65,8 @@
   "item_settings_section",
   "item_group",
   "stock_uom",
-  "warehouse"
+  "warehouse",
+  "us_dispatch_warehouse"
  ],
  "fields": [
   {
@@ -323,6 +324,13 @@
    "options": "Warehouse"
   },
   {
+   "description": "Orders to US buyers ship from this warehouse when it holds enough stock of the item (e.g. a US partner who dispatches for you). Otherwise they ship from the Warehouse above.",
+   "fieldname": "us_dispatch_warehouse",
+   "fieldtype": "Link",
+   "label": "US Dispatch Warehouse",
+   "options": "Warehouse"
+  },
+  {
    "fieldname": "column_break_ftdq",
    "fieldtype": "Column Break"
   },
@@ -461,7 +469,7 @@
  ],
  "grid_page_length": 50,
  "links": [],
- "modified": "2026-10-25 12:00:00.000000",
+ "modified": "2026-10-26 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Etsy",
  "name": "Etsy Shop",

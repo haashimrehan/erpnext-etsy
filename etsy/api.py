@@ -287,6 +287,10 @@ class EtsyRESTv3:
 			**self.args(endpoint=f"/v3/application/shops/{shop_id}/receipts/{receipt_id}/payments")
 		)
 
+	def getShopReceipt(self, client: SyncCacheClient, shop_id: int, receipt_id: int) -> Response:
+		"""Retrieves a single receipt, identified by receipt_id, from a specific shop."""
+		return client.get(**self.args(endpoint=f"/v3/application/shops/{shop_id}/receipts/{receipt_id}"))
+
 	def getShopReceipts(self, client: SyncCacheClient, query_params: QP_getShopReceipts) -> Response:
 		"""Requests the Shop Receipts from a specific Shop, unfiltered or filtered by receipt id range or offset, date, paid, and/or shipped purchases."""
 		return client.get(
@@ -373,6 +377,10 @@ class EtsyAPI:
 		resp = self.rest.getShopPaymentByReceiptId(self.client, shop_id, receipt_id).json()
 		return (resp["count"], [Payment.model_validate(result) for result in resp["results"]])
 
+	def getShopReceipt(self, shop_id: int, receipt_id: int) -> ShopReceipt:
+		"""Retrieves a single receipt, e.g. to see whether an already imported order has shipped since."""
+		return ShopReceipt.model_validate(self.rest.getShopReceipt(self.client, shop_id, receipt_id).json())
+
 	def getShopReceipts(self, query_params: QP_getShopReceipts) -> tuple[int, list[ShopReceipt]]:
 		"""Requests the Shop Receipts from a specific Shop, unfiltered or filtered by receipt id range or offset, date, paid, and/or shipped purchases."""
 		resp = self.rest.getShopReceipts(self.client, query_params).json()
@@ -405,6 +413,9 @@ def synchronise_receipts():
 		try:
 			etsy_shop: EtsyShop = frappe.get_doc("Etsy Shop", shop.name)
 			etsy_shop.import_receipts(abort_on_exist=True)
+			frappe.db.commit()
+			# Orders imported before they shipped: the import above never revisits them.
+			etsy_shop.deliver_shipped_orders()
 			frappe.db.commit()
 		except Exception:
 			frappe.db.rollback()

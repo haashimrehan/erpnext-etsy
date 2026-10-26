@@ -10,8 +10,13 @@ import erpnext
 import frappe
 import pytz
 from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
-from erpnext.selling.doctype.sales_order.sales_order import close_or_unclose_sales_orders, make_sales_invoice
+from erpnext.selling.doctype.sales_order.sales_order import (
+	close_or_unclose_sales_orders,
+	make_delivery_note,
+	make_sales_invoice,
+)
 from erpnext.setup.utils import get_exchange_rate
+from erpnext.stock.utils import get_stock_balance
 from frappe import _
 from frappe.model.document import Document
 from frappe.utils import (
@@ -24,6 +29,7 @@ from frappe.utils import (
 	get_link_to_form,
 	get_system_timezone,
 	getdate,
+	now_datetime,
 	today,
 )
 from requests_oauthlib import OAuth2Session
@@ -36,6 +42,7 @@ from etsy.api import (
 	fetch_all,
 )
 from etsy.datastruct import LedgerEntry, ListingType
+from etsy.delivery import dispatch_warehouse, ship_info, stock_shortfall, tracking_label
 from etsy.fees import (
 	CATEGORY_FEES,
 	CATEGORY_MARKETING,
@@ -750,14 +757,159 @@ class EtsyShop(Document):
 					payment_entry.insert(ignore_permissions=True)
 					payment_entry.submit()
 
-					# close Sales Order if is_shipped or everything is_digital
-					if receipt.is_shipped or all([t.is_digital for t in receipt.transactions]):
+					# digital-only orders have nothing to ship
+					if all([t.is_digital for t in receipt.transactions]):
 						close_or_unclose_sales_orders(f'["{sales_order.name}"]', "Closed")
 
 				frappe.db.commit()
 			except Exception:
 				frappe.db.rollback()
 				frappe.log_error(f"Etsy: Failed to import receipt {receipt.receipt_id}")
+				continue
+
+			# Already shipped: record the delivery. Kept apart so a delivery problem never undoes the import;
+			# deliver_shipped_orders retries it on the next sync.
+			if receipt.is_paid and receipt.is_shipped and not all(t.is_digital for t in receipt.transactions):
+				try:
+					self.create_delivery_note(sales_order, receipt)
+					frappe.db.commit()
+				except Exception:
+					frappe.db.rollback()
+					frappe.log_error(f"Etsy: Failed to create Delivery Note for receipt {receipt.receipt_id}")
+
+	### Shipped Etsy orders -> Delivery Notes ###
+	@frappe.whitelist()
+	def enqueue_deliver_shipped_orders(self):
+		"""Enqueue the Delivery Note sweep over imported Etsy orders as a background job."""
+		frappe.enqueue(
+			"etsy.etsy.doctype.etsy_shop.etsy_shop.run_deliver_shipped_orders",
+			queue="long",
+			timeout=3600,
+			enqueue_after_commit=True,
+			user=frappe.session.user,
+			etsy_shop=self.name,
+		)
+
+	def undelivered_orders(self) -> list[str]:
+		"""Submitted Etsy Sales Orders of this shop that are not fully delivered yet, oldest first."""
+		return frappe.get_all(
+			"Sales Order",
+			filters={
+				"company": self.company,
+				"docstatus": 1,
+				"etsy_order_id": ["is", "set"],
+				"per_delivered": ["<", 100],
+				"status": ["not in", ["Completed", "Cancelled"]],
+			},
+			pluck="name",
+			order_by="transaction_date asc",
+		)
+
+	def deliver_shipped_orders(self, etsy_api: EtsyAPI | None = None) -> dict:
+		"""
+		Create Delivery Notes for imported Etsy orders that Etsy now reports as shipped.
+
+		The receipt import only looks at new receipts, so an order imported before it shipped is
+		picked up here. Orders without stock items (digital downloads) are skipped.
+		"""
+		api = etsy_api or EtsyAPI(self)
+		created, failed = [], []
+		for name in self.undelivered_orders():
+			sales_order = frappe.get_doc("Sales Order", name)
+			if not any(frappe.db.get_value("Item", i.item_code, "is_stock_item") for i in sales_order.items):
+				continue
+			try:
+				receipt = api.getShopReceipt(self.shop_id, cint(sales_order.etsy_order_id))
+				if not receipt.is_shipped:
+					continue
+				created.append(self.create_delivery_note(sales_order, receipt))
+				frappe.db.commit()
+			except Exception:
+				frappe.db.rollback()
+				frappe.log_error(f"Etsy: Failed to create Delivery Note for {name}")
+				failed.append(name)
+		return {"created": created, "failed": failed}
+
+	def create_delivery_note(self, sales_order: Document, receipt) -> str:
+		"""
+		Deliver a shipped Etsy order, dated when it shipped and carrying the carrier and tracking code.
+
+		Products are made to order and their material is expensed when bought, so they are never received
+		into stock. Any shortfall in the dispatch warehouse is first brought in by a zero-value Material
+		Receipt; the Delivery Note then costs nothing either and only records the shipment.
+		US buyers are served from the US dispatch warehouse when it holds the stock.
+		"""
+		info = ship_info(receipt)
+		shipped = info.shipped_at or now_datetime()
+		posting_date, posting_time = shipped.date(), shipped.strftime("%H:%M:%S")
+
+		if sales_order.status == "Closed":  # the import used to close shipped orders; reopen to deliver
+			close_or_unclose_sales_orders(json.dumps([sales_order.name]), "Draft")
+
+		dn: Document = make_delivery_note(sales_order.name)
+		dn.set_posting_time = 1
+		dn.posting_date = posting_date
+		dn.posting_time = posting_time
+		if label := tracking_label(info):
+			dn.lr_no = label
+			dn.lr_date = posting_date
+
+		needed: dict[tuple[str, str], float] = {}
+		for item in dn.items:
+			if not frappe.db.get_value("Item", item.item_code, "is_stock_item"):
+				continue
+			home = item.warehouse or self.warehouse
+			us_stock = (
+				flt(get_stock_balance(item.item_code, self.us_dispatch_warehouse, posting_date, posting_time))
+				if self.us_dispatch_warehouse
+				else 0.0
+			)
+			item.warehouse = dispatch_warehouse(
+				receipt.country_iso, home, self.us_dispatch_warehouse, us_stock >= flt(item.stock_qty)
+			)
+			item.allow_zero_valuation_rate = 1
+			key = (item.item_code, item.warehouse)
+			needed[key] = needed.get(key, 0.0) + flt(item.stock_qty)
+
+		on_hand = {
+			(code, wh): flt(get_stock_balance(code, wh, posting_date, posting_time)) for code, wh in needed
+		}
+		if missing := stock_shortfall(needed, on_hand):
+			self.receive_made_to_order_stock(missing, shipped, sales_order.name)
+
+		dn.flags.ignore_mandatory = True
+		dn.insert(ignore_permissions=True)
+		dn.submit()
+		return dn.name
+
+	def receive_made_to_order_stock(self, missing: dict, shipped: datetime.datetime, sales_order: str) -> str:
+		"""Zero-value Material Receipt, a second before the shipment, so the delivery has stock to issue."""
+		received = shipped - datetime.timedelta(seconds=1)
+		entry: Document = frappe.new_doc("Stock Entry")
+		entry.stock_entry_type = "Material Receipt"
+		entry.purpose = "Material Receipt"
+		entry.company = self.company
+		entry.set_posting_time = 1
+		entry.posting_date = received.date()
+		entry.posting_time = received.strftime("%H:%M:%S")
+		entry.remarks = _(
+			"Made-to-order stock for Etsy order {0}: material was expensed when bought, so it carries no value."
+		).format(sales_order)
+		for (item_code, warehouse), qty in missing.items():
+			entry.append(
+				"items",
+				{
+					"item_code": item_code,
+					"qty": qty,
+					"t_warehouse": warehouse,
+					"basic_rate": 0,
+					"set_basic_rate_manually": 1,
+					"allow_zero_valuation_rate": 1,
+				},
+			)
+		entry.insert(ignore_permissions=True)
+		entry.submit()
+		return entry.name
 
 	### Etsy ledger -> Journal Entries (fees & payouts) ###
 	def validate_fee_settings(self):
@@ -1343,6 +1495,19 @@ def run_import_receipts(user, etsy_shop, min_date=None, max_date=None):
 			"indicator": "green",
 			"alert": True,
 		},
+		user=user,
+	)
+
+
+def run_deliver_shipped_orders(user, etsy_shop):
+	shop: EtsyShop = frappe.get_doc("Etsy Shop", etsy_shop)
+	result = shop.deliver_shipped_orders()
+	message = _("{0} Delivery Note(s) created for shipped Etsy orders.").format(len(result["created"]))
+	if result["failed"]:
+		message += " " + _("Failed: {0} (see Error Log).").format(", ".join(result["failed"]))
+	frappe.publish_realtime(
+		"msgprint",
+		{"message": message, "indicator": "red" if result["failed"] else "green", "alert": True},
 		user=user,
 	)
 

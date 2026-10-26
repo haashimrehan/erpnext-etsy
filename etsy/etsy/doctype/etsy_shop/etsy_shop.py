@@ -59,6 +59,7 @@ from etsy.fees import (
 	ledger_amount,
 	match_bank_transaction,
 )
+from etsy.price_list import PriceListOption, pick_price_list
 
 AUTHORIZATION_URI = "https://www.etsy.com/oauth/connect"
 TOKEN_URI = "https://api.etsy.com/v3/public/oauth/token"
@@ -605,6 +606,7 @@ class EtsyShop(Document):
 				sales_order.plc_conversion_rate = conversion_rate
 
 				sales_order.transaction_date = sales_order.po_date = receipt.created_timestamp.date()
+				self.set_selling_price_list(sales_order, address.country)
 				sales_order.delivery_date = max(
 					[t.expected_ship_date.date() for t in receipt.transactions if t.expected_ship_date]
 					+ [receipt.create_timestamp.date()]
@@ -830,6 +832,46 @@ class EtsyShop(Document):
 				failed.append(name)
 		return {"created": created, "failed": failed}
 
+	def set_selling_price_list(self, doc: Document, country: str | None) -> None:
+		"""
+		Give a selling document a Price List that applies to the buyer's country, as ERPNext rejects
+		Price Lists restricted to other countries. Rates are taken from Etsy, so only the list changes.
+		"""
+		options = [
+			PriceListOption(
+				p.name,
+				p.currency,
+				frappe.get_all(
+					"Price List Country",
+					filters={"parent": p.name, "parenttype": "Price List"},
+					pluck="country",
+				),
+			)
+			for p in frappe.get_all(
+				"Price List", filters={"selling": 1, "enabled": 1}, fields=["name", "currency"]
+			)
+		]
+		current = doc.selling_price_list or frappe.db.get_single_value(
+			"Selling Settings", "selling_price_list"
+		)
+		name = pick_price_list(options, country, doc.currency, current)
+		if not name or name == current:
+			return
+
+		doc.selling_price_list = name
+		doc.price_list_currency = frappe.db.get_value("Price List", name, "currency")
+		company_currency = erpnext.get_company_currency(doc.company)
+		if doc.price_list_currency == doc.currency:
+			doc.plc_conversion_rate = doc.conversion_rate
+		elif doc.price_list_currency == company_currency:
+			doc.plc_conversion_rate = 1.0
+		else:
+			doc.plc_conversion_rate = get_exchange_rate(
+				doc.price_list_currency,
+				company_currency,
+				str(doc.get("posting_date") or doc.get("transaction_date") or today()),
+			)
+
 	def create_delivery_note(self, sales_order: Document, receipt) -> str:
 		"""
 		Deliver a shipped Etsy order, dated when it shipped and carrying the carrier and tracking code.
@@ -849,6 +891,8 @@ class EtsyShop(Document):
 		dn.set_posting_time = 1
 		dn.posting_date = posting_date
 		dn.posting_time = posting_time
+		if dn.customer_address:
+			self.set_selling_price_list(dn, frappe.db.get_value("Address", dn.customer_address, "country"))
 		if label := tracking_label(info):
 			dn.lr_no = label
 			dn.lr_date = posting_date

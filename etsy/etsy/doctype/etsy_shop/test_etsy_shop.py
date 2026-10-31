@@ -14,6 +14,7 @@ from etsy.etsy.doctype.etsy_shop.etsy_shop import (
 	book_ledger_summary,
 	month_is_finished,
 	months_between,
+	order_cost_center,
 	short_title,
 )
 from etsy.delivery import ship_info, stock_shortfall, tracking_label
@@ -396,6 +397,25 @@ class TestFeeClassification(FrappeTestCase):
 		self.assertFalse(is_payout(ledger(11119, "Payment", ledger_type="payment")))
 		self.assertFalse(is_payout(ledger(-60, "Listing fee")))
 		self.assertFalse(is_payout(ledger(0, "Deposit", ledger_type="deposit")))
+
+
+class TestOrderCostCenter(FrappeTestCase):
+	"""Shipping, gift wrap and VAT rows follow the order's items (pure logic)."""
+
+	def items(self, *digital):
+		return [SimpleNamespace(is_digital=d) for d in digital]
+
+	def test_physical_order(self):
+		self.assertEqual(order_cost_center(self.items(False), "Shop", "Digital"), "Shop")
+
+	def test_digital_order(self):
+		self.assertEqual(order_cost_center(self.items(True, True), "Shop", "Digital"), "Digital")
+
+	def test_mixed_order_uses_physical(self):
+		self.assertEqual(order_cost_center(self.items(True, False), "Shop", "Digital"), "Shop")
+
+	def test_unset_falls_back_to_default(self):
+		self.assertIsNone(order_cost_center(self.items(False), None, "Digital"))
 
 
 class TestBuildJournalRows(FrappeTestCase):

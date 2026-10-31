@@ -111,6 +111,13 @@ def month_is_finished(year: int, month: int, on_date=None) -> bool:
 	return getdate(get_last_day(f"{cint(year):04d}-{cint(month):02d}-01")) < getdate(on_date or today())
 
 
+def order_cost_center(transactions, physical: str | None, digital: str | None) -> str | None:
+	"""Cost center for an order's shipping, gift wrap and VAT rows: physical if anything ships."""
+	if any(not t.is_digital for t in transactions):
+		return physical
+	return digital
+
+
 def short_title(title: str) -> str:  # TODO: move to utils
 	return (
 		title.replace("&quot;", '"')
@@ -699,6 +706,13 @@ class EtsyShop(Document):
 							"description": "Gift Wrap",
 						},
 					)
+
+				# Without this the tax rows land on the company default cost center
+				if tax_cost_center := order_cost_center(
+					receipt.transactions, self.cost_center_physical, self.cost_center_digital
+				):
+					for tax in sales_order.taxes:
+						tax.cost_center = tax_cost_center
 
 				# Discount
 				if receipt.discount_amt.as_float() > 0.0:

@@ -17,6 +17,7 @@ from etsy.etsy.doctype.etsy_shop.etsy_shop import (
 	order_cost_center,
 	short_title,
 )
+from etsy.api import EtsyAPIError, read_json
 from etsy.delivery import ship_info, stock_shortfall, tracking_label
 from etsy.price_list import PriceListOption, pick_price_list
 from etsy.fees import (
@@ -920,3 +921,45 @@ class TestPriceListChoice(FrappeTestCase):
 		self.assertEqual(
 			pick_price_list(list(self.LISTS), None, "USD", "Standard Selling"), "Standard Selling"
 		)
+
+
+class TestReadJson(FrappeTestCase):
+	"""An Etsy error must say what Etsy answered, not fail later on a missing 'count' key."""
+
+	def response(self, status, body):
+		import httpx
+
+		request = httpx.Request("GET", "https://api.etsy.com/v3/application/shops/1/receipts?limit=100")
+		return httpx.Response(status, json=body, request=request)
+
+	def test_success_returns_the_body(self):
+		self.assertEqual(
+			read_json(self.response(200, {"count": 0, "results": []})), {"count": 0, "results": []}
+		)
+
+	def test_error_names_status_endpoint_and_message(self):
+		with self.assertRaises(EtsyAPIError) as ctx:
+			read_json(self.response(401, {"error": "invalid_token"}))
+		message = str(ctx.exception)
+		self.assertIn("HTTP 401", message)
+		self.assertIn("/v3/application/shops/1/receipts", message)
+		self.assertIn("invalid_token", message)
+		self.assertNotIn("limit=100", message)
+
+	def test_error_without_request(self):
+		import httpx
+
+		with self.assertRaises(EtsyAPIError):
+			read_json(httpx.Response(429, text="Too Many Requests"))
+
+
+class TestTokenRefreshMargin(FrappeTestCase):
+	def test_refresh_happens_before_expiry(self):
+		from etsy.etsy.doctype.etsy_shop.etsy_shop import TOKEN_REFRESH_MARGIN, EtsyShop
+
+		shop = SimpleNamespace(token_expires_in=lambda: TOKEN_REFRESH_MARGIN - 1)
+		self.assertTrue(EtsyShop.token_expired(shop))
+		shop = SimpleNamespace(token_expires_in=lambda: 3000)
+		self.assertFalse(EtsyShop.token_expired(shop))
+		self.assertGreater(TOKEN_REFRESH_MARGIN, 0)
+		self.assertLess(TOKEN_REFRESH_MARGIN, 600)

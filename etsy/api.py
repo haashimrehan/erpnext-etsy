@@ -20,6 +20,21 @@ if TYPE_CHECKING:
 
 
 ### Helper functions
+class EtsyAPIError(Exception):
+	"""Etsy answered with an error instead of data. The message keeps the HTTP status and Etsy's reply."""
+
+
+def read_json(resp: Response) -> dict:
+	"""Return the JSON body of an Etsy response, or raise EtsyAPIError naming the status and Etsy's message."""
+	if resp.status_code >= 400:
+		try:
+			where = f"{resp.request.method} {resp.request.url.path}"
+		except RuntimeError:  # a Response built without a request
+			where = "request"
+		raise EtsyAPIError(f"Etsy API {where} -> HTTP {resp.status_code}: {resp.text[:500]}")
+	return resp.json()
+
+
 def fetch_all(fetch_func: Callable[[int], tuple[int, list[T]]], start_offset: int = 0) -> Iterator[T]:
 	"""
 	### Usage example:
@@ -344,7 +359,7 @@ class EtsyAPI:
 
 	def getMe(self) -> Me:
 		"""Returns basic info for the user making the request."""
-		resp = self.rest.getMe(self.client).json()
+		resp = read_json(self.rest.getMe(self.client))
 		return Me.model_validate(resp)
 
 	def getUser(self, user_id: int) -> User:
@@ -355,7 +370,7 @@ class EtsyAPI:
 		### query params:
 		- user_id: The numeric ID of a user.
 		"""
-		resp = self.rest.getUser(self.client, user_id).json()
+		resp = read_json(self.rest.getUser(self.client, user_id))
 		return User.model_validate(resp)
 
 	def getUserAddress(self, user_address_id: int) -> Address:
@@ -364,7 +379,7 @@ class EtsyAPI:
 		### query params:
 		- user_address_id: The numeric ID of the user's address.
 		"""
-		resp = self.rest.getUserAddress(self.client, user_address_id).json()
+		resp = read_json(self.rest.getUserAddress(self.client, user_address_id))
 		return Address.model_validate(resp)
 
 	def getShopPaymentByReceiptId(self, shop_id: int, receipt_id: int) -> tuple[int, list[Payment]]:
@@ -374,28 +389,30 @@ class EtsyAPI:
 		- shop_id: The unique positive non-zero numeric ID for an Etsy Shop.
 		- receipt_id: The numeric ID for the receipt associated to this transaction.
 		"""
-		resp = self.rest.getShopPaymentByReceiptId(self.client, shop_id, receipt_id).json()
+		resp = read_json(self.rest.getShopPaymentByReceiptId(self.client, shop_id, receipt_id))
 		return (resp["count"], [Payment.model_validate(result) for result in resp["results"]])
 
 	def getShopReceipt(self, shop_id: int, receipt_id: int) -> ShopReceipt:
 		"""Retrieves a single receipt, e.g. to see whether an already imported order has shipped since."""
-		return ShopReceipt.model_validate(self.rest.getShopReceipt(self.client, shop_id, receipt_id).json())
+		return ShopReceipt.model_validate(
+			read_json(self.rest.getShopReceipt(self.client, shop_id, receipt_id))
+		)
 
 	def getShopReceipts(self, query_params: QP_getShopReceipts) -> tuple[int, list[ShopReceipt]]:
 		"""Requests the Shop Receipts from a specific Shop, unfiltered or filtered by receipt id range or offset, date, paid, and/or shipped purchases."""
-		resp = self.rest.getShopReceipts(self.client, query_params).json()
+		resp = read_json(self.rest.getShopReceipts(self.client, query_params))
 		return (resp["count"], [ShopReceipt.model_validate(result) for result in resp["results"]])
 
 	def getShopPaymentAccountLedgerEntries(
 		self, query_params: QP_getShopPaymentAccountLedgerEntries
 	) -> tuple[int, list[LedgerEntry]]:
 		"""Get a Shop Payment Account Ledger's Entries"""
-		resp = self.rest.getShopPaymentAccountLedgerEntries(self.client, query_params).json()
+		resp = read_json(self.rest.getShopPaymentAccountLedgerEntries(self.client, query_params))
 		return (resp["count"], [LedgerEntry.model_validate(result) for result in resp["results"]])
 
 	def getListingsByShop(self, query_params: QP_getListingsByShop) -> tuple[int, list[Listing]]:
 		"""Endpoint to list Listings that belong to a Shop."""
-		resp = self.rest.getListingsByShop(self.client, query_params).json()
+		resp = read_json(self.rest.getListingsByShop(self.client, query_params))
 		return (resp["count"], [Listing.model_validate(result) for result in resp["results"]])
 
 

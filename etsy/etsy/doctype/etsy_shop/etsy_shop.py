@@ -63,6 +63,8 @@ from etsy.price_list import PriceListOption, pick_price_list
 
 AUTHORIZATION_URI = "https://www.etsy.com/oauth/connect"
 TOKEN_URI = "https://api.etsy.com/v3/public/oauth/token"
+# Seconds before expiry at which the access token is refreshed (it lasts an hour; runs every few minutes).
+TOKEN_REFRESH_MARGIN = 120
 SCOPES = ["address_r", "email_r", "listings_r", "shops_r", "transactions_r"]
 QUERY_PARAMS = {}
 LISTING_STATES = ("active", "inactive", "sold_out", "draft", "expired")
@@ -202,7 +204,8 @@ class EtsyShop(Document):
 		return cint((expiry_utc - now_utc).total_seconds())  # why do comp. in UTC?
 
 	def token_expired(self) -> bool:
-		return self.token_expires_in() < 0
+		# Refresh a little early: a token with seconds left can expire before Etsy answers the request.
+		return self.token_expires_in() < TOKEN_REFRESH_MARGIN
 
 	def update_expires_in(self, seconds: int):
 		self.expires_in = seconds

@@ -55,6 +55,7 @@
   "column_break_payout",
   "payout_journal_entry_submit",
   "bill_payment_account",
+  "refund_credit_note_submit",
   "auto_reconcile",
   "bank_match_description",
   "bank_match_days",
@@ -435,7 +436,14 @@
    "fieldtype": "Link",
    "label": "Bill Payment Account",
    "options": "Account",
-   "description": "Card (or bank) account Etsy charges when the shop balance is negative (\"Etsy.com*IE\" / \"Etsy Monthly Bill\"). Each charge is booked as a Bank Entry from this account to the Bank Account (Etsy clearing), using the exact amount charged. Leave empty to skip."
+   "description": "Card (or bank) account Etsy charges when the shop balance is negative (\"Etsy.com*IE\" / \"Etsy Monthly Bill\"). Card charges for a buyer refund (\"Charge for refund\") are booked the same way. Each charge is booked as a Bank Entry from this account to the Bank Account (Etsy clearing), using the exact amount charged. Leave empty to skip."
+  },
+  {
+   "default": "0",
+   "fieldname": "refund_credit_note_submit",
+   "fieldtype": "Check",
+   "label": "Submit refund credit notes automatically",
+   "description": "Refunds you give buyers are booked as Sales Invoice returns (credit notes) with a refund Payment Entry from the Bank Account (Etsy clearing). If unchecked they are saved as drafts for review; the payment is created after you submit the credit note."
   },
   {
    "default": "1",
@@ -461,7 +469,7 @@
  ],
  "grid_page_length": 50,
  "links": [],
- "modified": "2026-10-25 12:00:00.000000",
+ "modified": "2026-11-27 17:00:00.000000",
  "modified_by": "Administrator",
  "module": "Etsy",
  "name": "Etsy Shop",

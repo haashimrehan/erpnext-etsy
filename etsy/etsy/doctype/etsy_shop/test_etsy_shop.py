@@ -34,7 +34,10 @@ from etsy.fees import (
 	format_breakdown,
 	is_bill_payment,
 	is_payout,
+	is_refund_charge,
 	match_bank_transaction,
+	missing_refund_credit,
+	refund_share,
 )
 
 _entry_ids = count(900_000_001)
@@ -963,3 +966,81 @@ class TestTokenRefreshMargin(FrappeTestCase):
 		self.assertFalse(EtsyShop.token_expired(shop))
 		self.assertGreater(TOKEN_REFRESH_MARGIN, 0)
 		self.assertLess(TOKEN_REFRESH_MARGIN, 600)
+
+
+class TestRefunds(FrappeTestCase):
+	"""
+	A partial refund to a buyer, modelled on order 4237975136 (Nov 2026 statement): the buyer got
+	US$12.72 back, of which US$0.72 was sales tax Etsy took back; the balance could not cover it, so
+	Etsy charged the card US$11.62 ("Charge for refund"), and credited US$1.39 of fees.
+	"""
+
+	def test_refund_share_leaves_out_the_buyer_sales_tax(self):
+		# order total 48.76 = 46.00 on the Sales Invoice + 2.76 sales tax Etsy remitted
+		self.assertEqual(refund_share(12.72, 48.76, 2.76), 12.00)
+
+	def test_full_refund_is_the_whole_invoice(self):
+		self.assertEqual(refund_share(48.76, 48.76, 2.76), 46.00)
+
+	def test_order_without_sales_tax(self):
+		self.assertEqual(refund_share(10.00, 40.00, 0.0), 10.00)
+
+	def test_nothing_to_share(self):
+		self.assertEqual(refund_share(0, 48.76, 2.76), 0.0)
+		self.assertEqual(refund_share(5, 0, 0), 0.0)
+
+	def test_credit_booked_by_hand_is_not_booked_again(self):
+		self.assertEqual(missing_refund_credit([12.00], 12.00), 0.0)
+
+	def test_missing_credit(self):
+		self.assertEqual(missing_refund_credit([12.00], 0.0), 12.00)
+
+	def test_second_refund_on_the_same_order(self):
+		self.assertEqual(missing_refund_credit([12.00, 5.00], 12.00), 5.00)
+
+	def test_rounding_is_not_a_refund(self):
+		self.assertEqual(missing_refund_credit([12.00], 11.995), 0.0)
+
+	def test_charge_for_refund_is_booked_like_a_bill_payment(self):
+		charge = ledger(1162, "Charge for refund Order #4237975136 (1 item)", ledger_type="PAYMENT")
+		self.assertTrue(is_refund_charge(charge))
+		self.assertTrue(is_bill_payment(charge))
+		self.assertIsNone(classify_ledger_entry(charge))
+
+	def test_refund_charge_tokens(self):
+		for token in ("refund_charge", "charge_for_refund", "REFUND_PAYMENT"):
+			self.assertTrue(is_bill_payment(real_ledger(1162, token, "refund")), token)
+
+	def test_refund_entries_that_are_not_card_charges(self):
+		for entry in (
+			ledger(
+				-1272, "Partial refund for Order #4237975136", ledger_type="refund", reference_type="refund"
+			),
+			ledger(
+				72, "Refund to buyer for sales tax", ledger_type="sales_tax_refund", reference_type="receipt"
+			),
+			ledger(
+				78,
+				"Credit for transaction fee",
+				ledger_type="transaction_refund",
+				reference_type="transaction",
+			),
+			ledger(38, "Credit for processing fee", ledger_type="PAYMENT_PROCESSING_FEE_REFUND"),
+			ledger(10, "Tax on fee credit", ledger_type="vat_refund", reference_type="receipt"),
+			ledger(75, "Transaction fee credit", ledger_type="refund", reference_type="transaction"),
+			ledger(
+				1272, "Reversal of a failed refund", ledger_type="refund_reversal", reference_type="refund"
+			),
+		):
+			self.assertFalse(is_refund_charge(entry), entry.description)
+			self.assertFalse(is_bill_payment(entry), entry.description)
+
+	def test_fee_credits_stay_in_the_fee_entry(self):
+		credit = ledger(
+			78, "Credit for transaction fee", ledger_type="transaction_refund", reference_type="transaction"
+		)
+		self.assertIsNotNone(classify_ledger_entry(credit))
+
+	def test_sample_months_have_no_refund_charge(self):
+		for entry in SAMPLE_MONTH + REAL_MONTH:
+			self.assertFalse(is_refund_charge(entry), entry.description)

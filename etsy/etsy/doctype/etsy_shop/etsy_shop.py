@@ -56,10 +56,16 @@ from etsy.fees import (
 	format_breakdown,
 	is_bill_payment,
 	is_payout,
+	is_refund_charge,
 	ledger_amount,
 	match_bank_transaction,
+	missing_refund_credit,
+	refund_share,
 )
 from etsy.price_list import PriceListOption, pick_price_list
+
+# marks the credit notes this app books for Etsy refunds (in their remarks)
+APP_REFUND_MARK = "Booked by the Etsy app"
 
 AUTHORIZATION_URI = "https://www.etsy.com/oauth/connect"
 TOKEN_URI = "https://api.etsy.com/v3/public/oauth/token"
@@ -1086,6 +1092,8 @@ class EtsyShop(Document):
 			"fee_journal_entry": None,
 			"payout_journal_entries": [],
 			"bill_payment_journal_entries": [],
+			"refund_credit_notes": [],
+			"refund_payment_entries": [],
 			"reconciled": [],
 			"unmatched": [],
 		}
@@ -1104,6 +1112,12 @@ class EtsyShop(Document):
 			result["bill_payment_journal_entries"] = bills["created"]
 			result["unmatched"].extend(bills["unmatched"])
 			first_day = get_first_day(f"{self.fee_period(year, month)}-01")
+			if ledger_entries is None:
+				# buyer refunds come from the receipts, not the ledger: only on a live run
+				refunds = self.create_refund_credit_notes(first_day, etsy_api)
+				result["refund_credit_notes"] = refunds["created"]
+				result["refund_payment_entries"] = refunds["paid"]
+				result["unmatched"].extend(refunds["unmatched"])
 			reconciled = self.reconcile_bank_transactions(first_day, get_last_day(first_day))
 			result["reconciled"] = reconciled["reconciled"]
 			result["unmatched"].extend(reconciled["unmatched"])
@@ -1376,8 +1390,9 @@ class EtsyShop(Document):
 		journal_entry.title = f"Etsy bill payment {posting_date} - {self.name}"
 		journal_entry.etsy_shop = self.name
 		journal_entry.etsy_ledger_entry_id = cstr(entry.entry_id)
+		reason = "fund a buyer refund" if is_refund_charge(entry) else "settle a negative balance"
 		journal_entry.user_remark = (
-			f"Etsy charged {charged_amount:.2f} {card_currency} to settle a negative balance of "
+			f"Etsy charged {charged_amount:.2f} {card_currency} to {reason} of "
 			f"{amount:.2f} {ledger_currency} ({self.name}), ledger entry {entry.entry_id}"
 		)
 
@@ -1400,6 +1415,188 @@ class EtsyShop(Document):
 			journal_entry.submit()
 
 		return journal_entry.name
+
+	### Buyer refunds -> credit notes
+
+	def create_refund_credit_notes(self, since, etsy_api: EtsyAPI | None = None) -> dict:
+		"""
+		Book the refunds the shop gave buyers as Sales Invoice returns (credit notes), then pay each
+		submitted credit note out of the Etsy clearing account.
+
+		Receipts changed since ``since`` are read from Etsy. For every receipt with refunds, the
+		seller's share of all its refunds (without the sales tax Etsy takes back, see ``refund_share``)
+		is compared with the credit already booked against its Sales Invoice, including credit notes
+		booked by hand, so running this again never books a refund twice.
+
+		Returns ``{"created": [names], "paid": [names], "unmatched": [messages]}``.
+		"""
+		result = {"created": [], "paid": [], "unmatched": []}
+		if not self.bank_account:
+			return result
+
+		api = etsy_api or EtsyAPI(self)
+		since_ts = int(frappe.utils.get_datetime(f"{getdate(since)} 00:00:00").timestamp())
+		for receipt in fetch_all(
+			lambda o: api.getShopReceipts(
+				QP_getShopReceipts(shop_id=self.shop_id, min_last_modified=since_ts, limit=100, offset=o)
+			)
+		):
+			if not receipt.refunds:
+				continue
+			label = _("Etsy order {0}").format(receipt.receipt_id)
+			invoice = frappe.db.get_value(
+				"Sales Invoice",
+				{"etsy_order_id": receipt.receipt_id, "docstatus": 1, "is_return": 0},
+				"name",
+			)
+			if not invoice:
+				result["unmatched"].append(_("{0}: refunded, but no submitted Sales Invoice").format(label))
+				continue
+
+			shares = [
+				refund_share(
+					r.amount.as_float(), receipt.grandtotal.as_float(), receipt.total_tax_cost.as_float()
+				)
+				for r in receipt.refunds
+			]
+			missing = missing_refund_credit(shares, self.credited_amount(invoice))
+			if not missing:
+				continue
+
+			# a savepoint, not a rollback: the month's fee and payout entries are not committed yet
+			frappe.db.savepoint("etsy_refund")
+			try:
+				refunded_on = max(r.created_timestamp for r in receipt.refunds).date()
+				result["created"].append(
+					self.create_refund_credit_note(invoice, missing, refunded_on, receipt)
+				)
+			except Exception:
+				frappe.db.rollback(save_point="etsy_refund")
+				frappe.log_error(
+					f"Etsy: Failed to book the refund credit note for receipt {receipt.receipt_id}"
+				)
+				result["unmatched"].append(
+					_("{0}: refund of {1} {2} not booked (see Error Log)").format(
+						label, f"{missing:.2f}", receipt.grandtotal.currency_code
+					)
+				)
+
+		paid = self.pay_refund_credit_notes()
+		result["paid"] = paid["created"]
+		result["unmatched"].extend(paid["unmatched"])
+		return result
+
+	@staticmethod
+	def credited_amount(invoice: str) -> float:
+		"""Credit already booked against a Sales Invoice: its returns that are drafts or submitted."""
+		returns = frappe.get_all(
+			"Sales Invoice",
+			filters={"return_against": invoice, "is_return": 1, "docstatus": ("<", 2)},
+			pluck="grand_total",
+		)
+		return flt(-sum(flt(g) for g in returns), 2)
+
+	def create_refund_credit_note(self, invoice: str, amount: float, posting_date, receipt) -> str:
+		"""
+		A Sales Invoice return of ``amount`` (invoice currency) against ``invoice``.
+
+		A refund of the whole invoice keeps the mapped return as it is (items, shipping and taxes). A
+		partial refund is put on one item line (qty -1) without tax or shipping rows, the way Etsy
+		shows it: one refund amount per order.
+		"""
+		from erpnext.accounts.doctype.sales_invoice.sales_invoice import make_sales_return
+
+		credit_note: Document = make_sales_return(invoice)
+		credit_note.update_outstanding_for_self = 1
+		credit_note.ignore_pricing_rule = 1  # keep the refund amount as given
+		credit_note.set_posting_time = 1
+		credit_note.posting_date = posting_date
+		credit_note.due_date = posting_date
+		if credit_note.meta.has_field("etsy_order_id"):
+			credit_note.etsy_order_id = None  # unique per sale, not for its return
+		for item in credit_note.items:
+			for link in ("sales_order", "so_detail", "delivery_note", "dn_detail"):
+				item.set(link, None)
+
+		original_total = abs(flt(frappe.db.get_value("Sales Invoice", invoice, "grand_total")))
+		if abs(original_total - amount) > 0.01:
+			item = next((i for i in credit_note.items if flt(i.rate) >= amount), None)
+			if not item:
+				frappe.throw(
+					_("Partial refund of {0} is larger than any item of {1}: book it by hand").format(
+						amount, invoice
+					)
+				)
+			item.qty = -1
+			item.rate = amount
+			item.price_list_rate = amount
+			item.discount_percentage = 0
+			item.discount_amount = 0
+			credit_note.items = [item]
+			credit_note.taxes = []
+			credit_note.taxes_and_charges = None
+			credit_note.discount_amount = 0
+			credit_note.additional_discount_percentage = 0
+
+		currency = receipt.grandtotal.currency_code
+		credit_note.remarks = (
+			f"Etsy refund for order {receipt.receipt_id} ({self.name}): {amount:.2f} {currency}, the "
+			f"shop's share after the sales tax Etsy takes back. {APP_REFUND_MARK}."
+		)
+		credit_note.flags.ignore_permissions = True
+		credit_note.insert(ignore_permissions=True)
+		if self.refund_credit_note_submit:
+			credit_note.submit()
+		return credit_note.name
+
+	def pay_refund_credit_notes(self) -> dict:
+		"""
+		A Payment Entry (Pay) from the Etsy clearing account for every submitted Etsy credit note that
+		is still open, so the refund leaves the clearing account the way the sale came in. Credit notes
+		saved as drafts are paid on a later run, after they are submitted.
+		"""
+		result = {"created": [], "unmatched": []}
+		etsy_invoices = frappe.get_all(
+			"Sales Invoice",
+			filters={"company": self.company, "docstatus": 1, "etsy_order_id": ("is", "set")},
+			pluck="name",
+		)
+		if not etsy_invoices:
+			return result
+		credit_notes = frappe.get_all(
+			"Sales Invoice",
+			filters={
+				"company": self.company,
+				"docstatus": 1,
+				"is_return": 1,
+				"outstanding_amount": ("<", 0),
+				"return_against": ("in", etsy_invoices),
+				# only the app's own credit notes: one made by hand may be meant for another invoice
+				"remarks": ("like", f"%{APP_REFUND_MARK}%"),
+			},
+			pluck="name",
+		)
+		for name in credit_notes:
+			if frappe.db.exists("Payment Entry Reference", {"reference_name": name, "docstatus": ("<", 2)}):
+				continue  # a draft payment already waits for review
+			frappe.db.savepoint("etsy_refund_payment")
+			try:
+				posting_date = frappe.db.get_value("Sales Invoice", name, "posting_date")
+				payment_entry: Document = get_payment_entry(
+					"Sales Invoice", name, bank_account=self.bank_account
+				)
+				payment_entry.reference_no = name
+				payment_entry.posting_date = posting_date
+				payment_entry.reference_date = posting_date
+				payment_entry.insert(ignore_permissions=True)
+				if self.refund_credit_note_submit:
+					payment_entry.submit()
+				result["created"].append(payment_entry.name)
+			except Exception:
+				frappe.db.rollback(save_point="etsy_refund_payment")
+				frappe.log_error(f"Etsy: Failed to pay the refund credit note {name}")
+				result["unmatched"].append(_("{0}: refund payment not booked (see Error Log)").format(name))
+		return result
 
 	def reconcile_bank_transactions(self, from_date, to_date) -> dict:
 		"""
@@ -1579,7 +1776,13 @@ def run_book_ledger(user, etsy_shop, from_date, to_date=None, fees=1, payouts=1)
 	payout_entries: list[str] = []
 	failed: list[str] = []
 	unfinished: list[str] = []
-	extra = {"bill_payment_entries": [], "reconciled": [], "unmatched": []}
+	extra = {
+		"bill_payment_entries": [],
+		"refund_credit_notes": [],
+		"refund_payment_entries": [],
+		"reconciled": [],
+		"unmatched": [],
+	}
 
 	for year, month in months:
 		period = shop.fee_period(year, month)
@@ -1607,6 +1810,8 @@ def run_book_ledger(user, etsy_shop, from_date, to_date=None, fees=1, payouts=1)
 				empty_months.append(period)
 		payout_entries.extend(result["payout_journal_entries"])
 		extra["bill_payment_entries"].extend(result["bill_payment_journal_entries"])
+		extra["refund_credit_notes"].extend(result["refund_credit_notes"])
+		extra["refund_payment_entries"].extend(result["refund_payment_entries"])
 		extra["reconciled"].extend(result["reconciled"])
 		extra["unmatched"].extend(result["unmatched"])
 
@@ -1678,6 +1883,8 @@ def book_ledger_summary(
 	bill_payment_entries=(),
 	reconciled=(),
 	unmatched=(),
+	refund_credit_notes=(),
+	refund_payment_entries=(),
 ) -> str:
 	"""Readable result of a (possibly multi month) ledger booking."""
 
@@ -1719,6 +1926,20 @@ def book_ledger_summary(
 		lines.append(
 			_("{0} card bill payment Journal Entries created: {1}").format(
 				len(bill_payment_entries), entry_links([(None, n) for n in bill_payment_entries])
+			)
+		)
+	if refund_credit_notes:
+		lines.append(
+			_("{0} refund credit notes created: {1}").format(
+				len(refund_credit_notes),
+				", ".join(get_link_to_form("Sales Invoice", n) for n in refund_credit_notes[:12]),
+			)
+		)
+	if refund_payment_entries:
+		lines.append(
+			_("{0} refund payments created: {1}").format(
+				len(refund_payment_entries),
+				", ".join(get_link_to_form("Payment Entry", n) for n in refund_payment_entries[:12]),
 			)
 		)
 	if reconciled:

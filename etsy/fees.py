@@ -224,7 +224,68 @@ def is_bill_payment(entry: LedgerLike | LedgerEntry) -> bool:
 		return True
 
 	description = (entry.description or "").strip().lower()
-	return description.startswith(BILL_PAYMENT_DESCRIPTION_PREFIXES)
+	if description.startswith(BILL_PAYMENT_DESCRIPTION_PREFIXES):
+		return True
+	return is_refund_charge(entry)
+
+
+# When a seller refunds a buyer and the Etsy balance cannot cover it, Etsy charges the card on file
+# right away. The monthly statement shows it as "Charge for refund Order #..." (type Payment); it is
+# booked exactly like a bill payment: card -> Etsy clearing.
+REFUND_CHARGE_PATTERNS = ("charge_for_refund", "refund_charge", "charge_refund", "refund_recoup")
+REFUND_CHARGE_DESCRIPTION_PREFIXES = ("charge for refund",)
+# positive refund-like entries that are NOT card charges: the sales tax Etsy returns to the seller
+# (it reverses the tax Etsy remitted), credits of fees and the reversal of a failed refund
+REFUND_CHARGE_EXCLUDE = ("sales_tax", "sales tax", "fee", "credit", "vat", "tax_", "revers")
+
+
+def is_refund_charge(entry: LedgerLike | LedgerEntry) -> bool:
+	"""True for a card charge Etsy made to fund a buyer refund (money into the Etsy balance)."""
+	if not entry.amount or entry.amount < 0:
+		return False
+
+	ledger_type = (entry.ledger_type or "").strip().lower()
+	description = (entry.description or "").strip().lower()
+	if any(p in ledger_type for p in REFUND_CHARGE_PATTERNS) or description.startswith(
+		REFUND_CHARGE_DESCRIPTION_PREFIXES
+	):
+		return True
+
+	# Etsy's machine token for this entry is not documented: accept any positive "refund" entry that is
+	# neither a fee credit nor a tax adjustment. A wrong guess is harmless because the Journal Entry is
+	# only created once a card transaction with the converted amount is found.
+	haystack = f"{ledger_type} {description} {(entry.reference_type or '').strip().lower()}"
+	if "refund" not in haystack or any(x in haystack for x in REFUND_CHARGE_EXCLUDE):
+		return False
+	return classify_ledger_entry(entry) is None
+
+
+### Buyer refunds -> credit notes
+
+
+def refund_share(refund_amount: float, grandtotal: float, buyer_sales_tax: float) -> float:
+	"""
+	The seller's part of a refund to a buyer.
+
+	Etsy refunds the buyer from the order total including the US / marketplace sales tax, then returns
+	the tax part to the seller because Etsy itself remitted it. That tax was never the seller's
+	revenue (it is not on the Sales Invoice), so the credit note covers the rest, in the same
+	proportion. Example (order 4237975136): refund 12.72 of 48.76 incl. 2.76 tax -> 12.00.
+	"""
+	if not refund_amount or not grandtotal:
+		return 0.0
+	revenue = grandtotal - (buyer_sales_tax or 0.0)
+	return round(refund_amount * revenue / grandtotal, 2)
+
+
+def missing_refund_credit(refund_shares: list[float], credited: float, tolerance: float = 0.01) -> float:
+	"""
+	How much credit note is still missing for an order, given the seller's share of every refund Etsy
+	reports and the credit already booked (positive number, e.g. the sum of existing return invoices,
+	including returns booked by hand). Returns 0 when nothing is missing.
+	"""
+	missing = round(sum(refund_shares) - (credited or 0.0), 2)
+	return missing if missing > tolerance else 0.0
 
 
 ### Bank transaction matching

@@ -278,6 +278,22 @@ def refund_share(refund_amount: float, grandtotal: float, buyer_sales_tax: float
 	return round(refund_amount * revenue / grandtotal, 2)
 
 
+def refund_shares(
+	refund_amounts: list[float], grandtotal: float, buyer_sales_tax: float, fully_refunded: bool = False
+) -> list[float]:
+	"""
+	The seller's share of each refund on an order. For an order Etsy reports as cancelled or fully
+	refunded, the shares are topped up to the whole sale, because a cancellation does not always
+	show up as a refund entry on the receipt.
+	"""
+	shares = [refund_share(a, grandtotal, buyer_sales_tax) for a in refund_amounts]
+	if fully_refunded:
+		rest = round(refund_share(grandtotal, grandtotal, buyer_sales_tax) - sum(shares), 2)
+		if rest > 0.01:
+			shares.append(rest)
+	return shares
+
+
 def missing_refund_credit(refund_shares: list[float], credited: float, tolerance: float = 0.01) -> float:
 	"""
 	How much credit note is still missing for an order, given the seller's share of every refund Etsy

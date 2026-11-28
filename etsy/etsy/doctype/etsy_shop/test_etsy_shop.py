@@ -38,6 +38,7 @@ from etsy.fees import (
 	match_bank_transaction,
 	missing_refund_credit,
 	refund_share,
+	refund_shares,
 )
 
 _entry_ids = count(900_000_001)
@@ -1044,3 +1045,15 @@ class TestRefunds(FrappeTestCase):
 	def test_sample_months_have_no_refund_charge(self):
 		for entry in SAMPLE_MONTH + REAL_MONTH:
 			self.assertFalse(is_refund_charge(entry), entry.description)
+
+	def test_cancelled_order_without_a_refund_entry_is_credited_in_full(self):
+		self.assertEqual(refund_shares([], 54.75, 0.0, fully_refunded=True), [54.75])
+
+	def test_cancelled_order_tops_up_the_listed_refunds(self):
+		self.assertEqual(sum(refund_shares([12.72], 48.76, 2.76, fully_refunded=True)), 46.00)
+
+	def test_cancelled_order_already_refunded_in_full_adds_nothing(self):
+		self.assertEqual(refund_shares([48.76], 48.76, 2.76, fully_refunded=True), [46.00])
+
+	def test_open_order_keeps_its_refunds(self):
+		self.assertEqual(refund_shares([12.72], 48.76, 2.76), [12.00])

@@ -41,7 +41,7 @@ from etsy.api import (
 	QP_getShopReceipts,
 	fetch_all,
 )
-from etsy.datastruct import LedgerEntry, ListingType
+from etsy.datastruct import LedgerEntry, ListingType, OrderStatus
 from etsy.delivery import ship_info, stock_shortfall, tracking_label
 from etsy.fees import (
 	CATEGORY_FEES,
@@ -60,9 +60,12 @@ from etsy.fees import (
 	ledger_amount,
 	match_bank_transaction,
 	missing_refund_credit,
-	refund_share,
+	refund_shares,
 )
 from etsy.price_list import PriceListOption, pick_price_list
+
+# Etsy order statuses that mean the buyer got all the money back
+FULLY_REFUNDED_STATUSES = (OrderStatus.CANCELED, OrderStatus.FULLY_REFUNDED)
 
 # marks the credit notes this app books for Etsy refunds (in their remarks)
 APP_REFUND_MARK = "Booked by the Etsy app"
@@ -1094,6 +1097,7 @@ class EtsyShop(Document):
 			"bill_payment_journal_entries": [],
 			"refund_credit_notes": [],
 			"refund_payment_entries": [],
+			"closed_sales_orders": [],
 			"reconciled": [],
 			"unmatched": [],
 		}
@@ -1117,6 +1121,7 @@ class EtsyShop(Document):
 				refunds = self.create_refund_credit_notes(first_day, etsy_api)
 				result["refund_credit_notes"] = refunds["created"]
 				result["refund_payment_entries"] = refunds["paid"]
+				result["closed_sales_orders"] = refunds["closed"]
 				result["unmatched"].extend(refunds["unmatched"])
 			reconciled = self.reconcile_bank_transactions(first_day, get_last_day(first_day))
 			result["reconciled"] = reconciled["reconciled"]
@@ -1428,9 +1433,12 @@ class EtsyShop(Document):
 		is compared with the credit already booked against its Sales Invoice, including credit notes
 		booked by hand, so running this again never books a refund twice.
 
-		Returns ``{"created": [names], "paid": [names], "unmatched": [messages]}``.
+		Orders Etsy reports as cancelled or fully refunded are credited in full, and their Sales Order
+		is closed when nothing was delivered.
+
+		Returns ``{"created": [names], "paid": [names], "closed": [names], "unmatched": [messages]}``.
 		"""
-		result = {"created": [], "paid": [], "unmatched": []}
+		result = {"created": [], "paid": [], "closed": [], "unmatched": []}
 		if not self.bank_account:
 			return result
 
@@ -1441,7 +1449,8 @@ class EtsyShop(Document):
 				QP_getShopReceipts(shop_id=self.shop_id, min_last_modified=since_ts, limit=100, offset=o)
 			)
 		):
-			if not receipt.refunds:
+			fully_refunded = receipt.status in FULLY_REFUNDED_STATUSES
+			if not (receipt.refunds or fully_refunded):
 				continue
 			label = _("Etsy order {0}").format(receipt.receipt_id)
 			invoice = frappe.db.get_value(
@@ -1453,12 +1462,15 @@ class EtsyShop(Document):
 				result["unmatched"].append(_("{0}: refunded, but no submitted Sales Invoice").format(label))
 				continue
 
-			shares = [
-				refund_share(
-					r.amount.as_float(), receipt.grandtotal.as_float(), receipt.total_tax_cost.as_float()
-				)
-				for r in receipt.refunds
-			]
+			if fully_refunded and (closed := self.close_cancelled_order(receipt.receipt_id)):
+				result["closed"].append(closed)
+
+			shares = refund_shares(
+				[r.amount.as_float() for r in receipt.refunds],
+				receipt.grandtotal.as_float(),
+				receipt.total_tax_cost.as_float(),
+				fully_refunded,
+			)
 			missing = missing_refund_credit(shares, self.credited_amount(invoice))
 			if not missing:
 				continue
@@ -1466,7 +1478,9 @@ class EtsyShop(Document):
 			# a savepoint, not a rollback: the month's fee and payout entries are not committed yet
 			frappe.db.savepoint("etsy_refund")
 			try:
-				refunded_on = max(r.created_timestamp for r in receipt.refunds).date()
+				refunded_on = max(
+					(r.created_timestamp for r in receipt.refunds), default=receipt.updated_timestamp
+				).date()
 				result["created"].append(
 					self.create_refund_credit_note(invoice, missing, refunded_on, receipt)
 				)
@@ -1485,6 +1499,23 @@ class EtsyShop(Document):
 		result["paid"] = paid["created"]
 		result["unmatched"].extend(paid["unmatched"])
 		return result
+
+	@staticmethod
+	def close_cancelled_order(receipt_id) -> str | None:
+		"""Close the open Sales Order of a cancelled Etsy order, if nothing of it was delivered."""
+		sales_order = frappe.db.get_value(
+			"Sales Order",
+			{
+				"etsy_order_id": receipt_id,
+				"docstatus": 1,
+				"status": ("not in", ("Closed", "Completed", "Cancelled")),
+				"per_delivered": 0,
+			},
+			"name",
+		)
+		if sales_order:
+			close_or_unclose_sales_orders(json.dumps([sales_order]), "Closed")
+		return sales_order
 
 	@staticmethod
 	def credited_amount(invoice: str) -> float:
@@ -1780,6 +1811,7 @@ def run_book_ledger(user, etsy_shop, from_date, to_date=None, fees=1, payouts=1)
 		"bill_payment_entries": [],
 		"refund_credit_notes": [],
 		"refund_payment_entries": [],
+		"closed_sales_orders": [],
 		"reconciled": [],
 		"unmatched": [],
 	}
@@ -1812,6 +1844,7 @@ def run_book_ledger(user, etsy_shop, from_date, to_date=None, fees=1, payouts=1)
 		extra["bill_payment_entries"].extend(result["bill_payment_journal_entries"])
 		extra["refund_credit_notes"].extend(result["refund_credit_notes"])
 		extra["refund_payment_entries"].extend(result["refund_payment_entries"])
+		extra["closed_sales_orders"].extend(result["closed_sales_orders"])
 		extra["reconciled"].extend(result["reconciled"])
 		extra["unmatched"].extend(result["unmatched"])
 
@@ -1885,6 +1918,7 @@ def book_ledger_summary(
 	unmatched=(),
 	refund_credit_notes=(),
 	refund_payment_entries=(),
+	closed_sales_orders=(),
 ) -> str:
 	"""Readable result of a (possibly multi month) ledger booking."""
 
@@ -1940,6 +1974,13 @@ def book_ledger_summary(
 			_("{0} refund payments created: {1}").format(
 				len(refund_payment_entries),
 				", ".join(get_link_to_form("Payment Entry", n) for n in refund_payment_entries[:12]),
+			)
+		)
+	if closed_sales_orders:
+		lines.append(
+			_("{0} cancelled Etsy orders closed: {1}").format(
+				len(closed_sales_orders),
+				", ".join(get_link_to_form("Sales Order", n) for n in closed_sales_orders[:12]),
 			)
 		)
 	if reconciled:
